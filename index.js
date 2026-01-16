@@ -66,6 +66,27 @@ bot.command("liste", (ctx) => {
 // Helper for formatting numbers
 const fmtNum = (num) => new Intl.NumberFormat('en-US').format(num);
 
+// Turkish Public Holidays 2026 (Format: MM-DD)
+// Note: Religious holidays (Ramazan/Kurban) change every year.
+const TR_HOLIDAYS_2026 = [
+    "01-01", // Yılbaşı
+    "03-20", "03-21", "03-22", // Ramazan Bayramı (Approx)
+    "04-23", // Ulusal Egemenlik
+    "05-01", // Emek ve Dayanışma
+    "05-19", // Gençlik ve Spor
+    "05-27", "05-28", "05-29", "05-30", // Kurban Bayramı (Approx)
+    "07-15", // Demokrasi ve Milli Birlik
+    "08-30", // Zafer Bayramı
+    "10-29"  // Cumhuriyet Bayramı
+];
+
+function getTrTime() {
+    // Render servers are usually UTC. Turkey is UTC+3.
+    const now = new Date();
+    const trTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+    return trTime;
+}
+
 // Logic state for reports
 let lastReportHour = -1;
 
@@ -75,101 +96,88 @@ async function sendStatusReport(isTest = false, targetChatId = null) {
         return;
     }
 
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
-    const header = isTest ? `📊 TEST RAPORU (${timeStr})` : `📊 Günlük Durum Raporu (${timeStr})`;
+    const trNow = getTrTime();
+    const timeStr = `${trNow.getUTCHours()}:${trNow.getUTCMinutes().toString().padStart(2, '0')}`;
+    const header = isTest ? `📊 TEST RAPORU (${timeStr})` : `📊 Bilgilendirme Mesajı (${timeStr})`;
 
     let msg = `${header}\n\n`;
 
     for (const stock of watchedStocks) {
         const cache = marketCache[stock];
         if (cache && cache.lastLot > 0) {
-            msg += `🔹 ${stock}: ${fmtNum(cache.lastLot)} Lot (Tavan Sağlam)\n`;
+            // Check if lot count is below 70% of initial average (30% drop)
+            const isWeakening = cache.initialAvg > 0 && cache.lastLot < (cache.initialAvg * 0.70);
+            const status = isWeakening ? "⚠️ Lotlar Eriyor!" : "✅ Tavan Sağlam";
+            msg += `🔹 ${stock}: ${fmtNum(cache.lastLot)} Lot (${status})\n`;
         } else {
             msg += `🔹 ${stock}: Veri yok veya tavan değil.\n`;
         }
     }
 
-    msg += `\n✅ Şu an için herhangi bir risk görünmemektedir.\n`;
+    if (!isTest) {
+        msg += `\n✅ Takip devam ediyor.`;
+    } else {
+        msg += `\n✅ Test başarılı.`;
+    }
 
-    // Next report time logic
     const reportHours = [10, 12, 14, 16, 18];
-    const currentHour = now.getHours();
+    const currentHour = trNow.getUTCHours();
     const nextHour = reportHours.find(h => h > currentHour) || reportHours[0];
     const nextDayStr = (nextHour <= currentHour) ? "yarın " : "";
 
-    msg += `🕒 Bir sonraki kontrol ${nextDayStr}${nextHour}:00'da yapılacaktır.`;
+    msg += `\n🕒 Bir sonraki kontrol ${nextDayStr}${nextHour}:00'da yapılacaktır.`;
 
-    // 1. Send to User (if triggered via command)
+    // Send to target or channel
     if (targetChatId) {
-        try {
-            await bot.api.sendMessage(targetChatId, msg);
-        } catch (e) { console.error("User report error:", e.message); }
+        try { await bot.api.sendMessage(targetChatId, msg); } catch (e) { }
     }
 
-    // 2. Send to Channel (Always, unless user is the channel itself)
-    // For /test, we explicitly WANT it to go to channel too as per request.
     if (config.CHANNEL_ID && String(config.CHANNEL_ID) !== String(targetChatId)) {
-        try {
-            await bot.api.sendMessage(config.CHANNEL_ID, msg);
-        } catch (e) {
-            console.error("Channel report error:", e.message);
-            if (isTest && targetChatId) {
-                await bot.api.sendMessage(targetChatId, `⚠️ Kanal mesajı gönderilemedi: ${e.message}`);
-            }
-        }
-    } else if (!config.CHANNEL_ID && isTest) {
-        if (targetChatId) await bot.api.sendMessage(targetChatId, "ℹ️ Kanal ID ayarlı olmadığı için kanala mesaj gitmedi.");
+        try { await bot.api.sendMessage(config.CHANNEL_ID, msg); } catch (e) { }
     }
 }
 
 // Commands
 bot.command("test", async (ctx) => {
-    console.log("✅ RECEIVED /test command from:", ctx.from?.username || ctx.from?.id);
-    try {
-        await ctx.reply("Test raporu hazırlanıyor... (Hem size hem kanala düşecek)");
-        await sendStatusReport(true, ctx.chat.id);
-        console.log("✅ Test report sent successfully");
-    } catch (e) {
-        console.error("❌ Error in /test handler:", e.message);
-    }
+    console.log("✅ RECEIVED /test command");
+    await ctx.reply("Test raporu hazırlanıyor...");
+    await sendStatusReport(true, ctx.chat.id);
 });
 
-// Main Loop
 // Main Loop
 async function checkMarket() {
     if (isCheckRunning) return;
 
-    // Check Time Window (09:56 - 18:00)
-    // Note: Server time might differ. User said TRT (UTC+3).
-    // Node.js Date depends on system time. Assuming system is correct (User said it is).
-    const now = new Date();
-    const hours = now.getHours();
-    const minutes = now.getMinutes();
-    const day = now.getDay(); // 0=Sun, 6=Sat
+    const trNow = getTrTime();
+    const hours = trNow.getUTCHours();
+    const minutes = trNow.getUTCMinutes();
+    const day = trNow.getUTCDay(); // 0=Sun, 6=Sat
+    const dateStr = `${(trNow.getUTCMonth() + 1).toString().padStart(2, '0')}-${trNow.getUTCDate().toString().padStart(2, '0')}`;
 
     const currentTimeVal = hours * 100 + minutes;
 
-    // Weekend check
-    if (day === 0 || day === 6) {
-        console.log("Weekend - Sleeping...");
+    // Weekend and Holiday Check
+    const isWeekend = (day === 0 || day === 6);
+    const isHoliday = TR_HOLIDAYS_2026.includes(dateStr);
+
+    if (isWeekend || isHoliday) {
+        // Express server above handle keep-alive, we just skip market logic
+        if (minutes % 60 === 0 && hours === 10) console.log("Borsa kapalı (Haftasonu/Tatil).");
         return;
     }
 
-    // Report Check (10, 12, 14, 16, 18) at minute 0
+    // Report Scheduling (Every 2 hours: 10, 12, 14, 16, 18)
     const reportHours = [10, 12, 14, 16, 18];
     if (minutes === 0 && reportHours.includes(hours) && lastReportHour !== hours) {
-        console.log(`Sending Periodic Report for ${hours}:00...`);
+        console.log(`TR Saati: ${hours}:00 - Rapor gönderiliyor...`);
         await sendStatusReport();
         lastReportHour = hours;
     }
 
-    // Time check (09:56 = 956, 18:00 = 1800)
-    // if (currentTimeVal < 956 || currentTimeVal >= 1800) {
-    //    console.log("Outside trading hours - Sleeping...");
-    //    return;
-    // }
-    // COMMENTED OUT FOR TESTING PURPOSES, UNCOMMENT FOR PRODUCTION
+    // Market Hours Check (09:58 - 18:00)
+    if (currentTimeVal < 958 || currentTimeVal >= 1800) {
+        return;
+    }
 
     isCheckRunning = true;
 
