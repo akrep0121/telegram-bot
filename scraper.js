@@ -4,6 +4,13 @@ puppeteer.use(StealthPlugin());
 
 const fs = require('fs');
 
+// Random User Agents to rotate
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+];
+
 /**
  * Launches a Headless Browser, navigates to the Web App URL,
  * and extracts the "Ceiling Lot" (Tavandaki Lot) data.
@@ -13,17 +20,37 @@ const fs = require('fs');
 async function fetchMarketData(url, symbol) {
     let browser = null;
     try {
+        // Random user agent
+        const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
         browser = await puppeteer.launch({
             headless: "new",
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled' // Extra stealth
+                '--disable-blink-features=AutomationControlled',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                `--user-agent=${userAgent}`
             ]
         });
 
         const page = await browser.newPage();
-        await page.setViewport({ width: 375, height: 812 });
+
+        // Random viewport to avoid fingerprinting
+        const viewports = [
+            { width: 375, height: 812 },
+            { width: 414, height: 896 },
+            { width: 390, height: 844 }
+        ];
+        const viewport = viewports[Math.floor(Math.random() * viewports.length)];
+        await page.setViewport(viewport);
+
+        // Set extra headers to look more human
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        });
 
         // Random delay before navigation (1-3 seconds) to appear more human
         await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
