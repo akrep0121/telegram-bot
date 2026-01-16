@@ -25,8 +25,27 @@ async function fetchMarketData(url, symbol) {
         const page = await browser.newPage();
         await page.setViewport({ width: 375, height: 812 });
 
+        // Random delay before navigation (1-3 seconds) to appear more human
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+
         // console.log(`Navigating to Web App...`); // Quiet logs
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        let retries = 3;
+        let loaded = false;
+
+        while (retries > 0 && !loaded) {
+            try {
+                await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+                loaded = true;
+            } catch (e) {
+                retries--;
+                if (retries > 0) {
+                    console.log(`Navigation failed, retrying... (${3 - retries}/3)`);
+                    await new Promise(r => setTimeout(r, 2000));
+                } else {
+                    throw e;
+                }
+            }
+        }
 
         // Check redirection
         const title = await page.title();
