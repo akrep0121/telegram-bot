@@ -31,13 +31,28 @@ let watchedStocks = []; // ['SASA', 'THYAO']
 let marketCache = {};   // { 'SASA': { lastLot: 5000, history: [...] } }
 let isCheckRunning = false;
 
-// Load watched stocks from file
-if (fs.existsSync('stocks.json')) {
-    watchedStocks = JSON.parse(fs.readFileSync('stocks.json', 'utf8'));
-}
+// Middleware: Admin Check
+// To lock the bot to YOU only, we need your Telegram User ID.
+// I will add a log to print the ID of anyone who sends a command.
+bot.use(async (ctx, next) => {
+    const adminId = process.env.ADMIN_ID; // We will set this in Render.com
+    const userId = ctx.from?.id;
+
+    // Log the ID of the person communicating with the bot
+    console.log(`[USER LOG] User: ${ctx.from?.username || "Unknown"} (ID: ${userId}) tried to use: ${ctx.message?.text}`);
+
+    if (adminId) {
+        if (String(userId) !== String(adminId)) {
+            // Uncomment the line below if you want the bot to reply to strangers
+            // return ctx.reply("Bu bot özeldir, sadece sahibi kullanabilir.");
+            return; // Ignore if not admin
+        }
+    }
+    await next();
+});
 
 // Commands
-bot.command("start", (ctx) => ctx.reply("Bot çalışıyor! /ekle [hisse] komutu ile hisse ekleyebilirsiniz."));
+bot.command("start", (ctx) => ctx.reply(`Bot çalışıyor! Sizin ID'niz: ${ctx.from.id}\nBu ID'yi Render.com'da ADMIN_ID olarak eklerseniz bot kilitlenir.`));
 
 bot.command("ekle", (ctx) => {
     const stock = ctx.match.toString().toUpperCase().trim();
