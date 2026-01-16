@@ -180,12 +180,21 @@ async function fetchMarketData(url, symbol) {
         // EXTRACT DATA
         const data = await page.evaluate(() => {
             const getTxt = (id) => document.getElementById(id)?.innerText?.trim() || "";
-            const parseNum = (str) => {
+            const parseNum = (str, isLot = false) => {
                 if (!str) return 0;
-                // Clean all non-digit and non-comma characters except for the last potential decimal separator
-                // Handling Turkish format: 1.250.000,00 or 1.250.000
-                let clean = str.replace(/[^\d,]/g, '').replace(',', '.');
-                return Math.floor(parseFloat(clean)) || 0;
+                let clean = str.trim();
+                if (isLot) {
+                    // For Lot counts: remove everything that is not a digit
+                    return parseInt(clean.replace(/\D/g, ''), 10) || 0;
+                }
+                // For Prices: 16.171,50 or 16,171.50
+                let lastSeparatorIndex = Math.max(clean.lastIndexOf(','), clean.lastIndexOf('.'));
+                if (lastSeparatorIndex !== -1 && (clean.length - lastSeparatorIndex <= 3)) {
+                    let decimal = clean.substring(lastSeparatorIndex + 1);
+                    let integer = clean.substring(0, lastSeparatorIndex).replace(/[,.]/g, '');
+                    return parseFloat(integer + "." + decimal) || 0;
+                }
+                return parseFloat(clean.replace(/[,.]/g, '')) || 0;
             };
 
             const priceStr = getTxt('lastPrice');
@@ -198,8 +207,6 @@ async function fetchMarketData(url, symbol) {
             const cellTexts = cells.map(c => c.innerText.trim());
 
             // In Tavan (Bid Side), usually: [Price] [Lot] [Count]
-            // We target Index 1 for Lot. 
-            // If the values look like price (small), we log it.
             const rawLotStr = cellTexts[1] || "0";
 
             return {
@@ -210,7 +217,7 @@ async function fetchMarketData(url, symbol) {
                 allCells: cellTexts,
                 price: parseNum(priceStr),
                 ceiling: parseNum(ceilingStr),
-                topBidLot: parseNum(rawLotStr),
+                topBidLot: parseNum(rawLotStr, true), // Passing true for Lot parsing
                 isCeiling: (priceStr !== "" && priceStr === ceilingStr)
             };
         });
