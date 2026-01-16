@@ -164,46 +164,64 @@ async function fetchMarketData(url, symbol) {
         await page.waitForSelector(depthTabSelector);
         await page.click(depthTabSelector);
 
-        // Wait for depth data
-        await new Promise(r => setTimeout(r, 1500));
+        // Wait for depth data - INCREASED WAIT FOR SLOW SERVERS
+        await new Promise(r => setTimeout(r, 3000));
         try {
             await page.waitForFunction(
                 () => {
                     const content = document.querySelector('#depthContent');
-                    return content && !content.innerText.includes('--') && content.innerText.length > 20;
+                    // Ensure it doesn't have Skeleton or "--"
+                    return content && !content.innerHTML.includes('skeleton') && !content.innerText.includes('--');
                 },
-                { timeout: 5000 }
+                { timeout: 10000 }
             );
-        } catch (e) { } // Proceed anyway to grab what we can
+        } catch (e) { console.log("Depth data loading timeout - proceeding with partial data."); }
 
         // EXTRACT DATA
         const data = await page.evaluate(() => {
             const getTxt = (id) => document.getElementById(id)?.innerText?.trim() || "";
             const parseNum = (str) => {
                 if (!str) return 0;
-                // "4,75" -> 4.75; "176.703" -> 176703
-                // Remove dots (thousands/millions) then replace comma with dot
-                // Wait, 176.703 is 176 thousand. So remove dots.
-                // Price 4,75.
-                // Logic: remove '.' (thousands sep), replace ',' with '.'
-                let clean = str.replace(/\./g, '').replace(',', '.');
-                return parseFloat(clean) || 0;
+                // Clean all non-digit and non-comma characters except for the last potential decimal separator
+                // Handling Turkish format: 1.250.000,00 or 1.250.000
+                let clean = str.replace(/[^\d,]/g, '').replace(',', '.');
+                return Math.floor(parseFloat(clean)) || 0;
             };
 
             const priceStr = getTxt('lastPrice');
             const ceilingStr = getTxt('infoCeiling');
 
-            // Depth Table Top Row (First Bid) => div:nth-child(2) is Lot
-            const topBidLotStr = document.querySelector('#depthContent .depth-row:not(.skeleton-row) > div:nth-child(2)')?.innerText || "0";
+            // Refined Depth Row Selection
+            const rows = Array.from(document.querySelectorAll('#depthContent .depth-row:not(.skeleton-row)'));
+            const firstRow = rows[0];
+            const cells = firstRow ? Array.from(firstRow.querySelectorAll('div')) : [];
+            const cellTexts = cells.map(c => c.innerText.trim());
+
+            // In Tavan (Bid Side), usually: [Price] [Lot] [Count]
+            // We target Index 1 for Lot. 
+            // If the values look like price (small), we log it.
+            const rawLotStr = cellTexts[1] || "0";
 
             return {
                 symbol: getTxt('symbolDisplay'),
+                priceStr: priceStr,
+                ceilingStr: ceilingStr,
+                rawLotStr: rawLotStr,
+                allCells: cellTexts,
                 price: parseNum(priceStr),
                 ceiling: parseNum(ceilingStr),
-                topBidLot: parseNum(topBidLotStr),
-                isCeiling: (priceStr === ceilingStr && priceStr !== "") // Exact string match covers float issues
+                topBidLot: parseNum(rawLotStr),
+                isCeiling: (priceStr !== "" && priceStr === ceilingStr)
             };
         });
+
+        if (data) {
+            console.log(`[DEBUG] ${symbol} -> Cells: [${data.allCells.join(' | ')}], Calculated Lot: ${data.topBidLot}`);
+            // Safety check: if read lot is suspiciously small (like the price), log a warning
+            if (data.topBidLot < 1000) {
+                console.log(`[WARN] ${symbol} lot count (${data.topBidLot}) seems too low. Check if columns shifted.`);
+            }
+        }
 
         return data;
 
