@@ -54,23 +54,25 @@ bot.use(async (ctx, next) => {
 // Commands
 bot.command("start", (ctx) => ctx.reply(`Bot çalışıyor! Sizin ID'niz: ${ctx.from.id}\nBu ID'yi Render.com'da ADMIN_ID olarak eklerseniz bot kilitlenir.`));
 
-bot.command("ekle", (ctx) => {
+bot.command("ekle", async (ctx) => {
     const stock = ctx.match.toString().toUpperCase().trim();
     if (!stock) return ctx.reply("Lütfen hisse adı girin. Örn: /ekle SASA");
     if (watchedStocks.includes(stock)) return ctx.reply("Bu hisse zaten takipte.");
 
     watchedStocks.push(stock);
-    fs.writeFileSync('stocks.json', JSON.stringify(watchedStocks));
-    ctx.reply(`${stock} takibe alındı.`);
+    // Cloud Save
+    ctx.reply(`${stock} takibe alındı. Buluta kaydediliyor...`);
+    await auth.saveWatchedStocks(watchedStocks);
 });
 
-bot.command("sil", (ctx) => {
+bot.command("sil", async (ctx) => {
     const stock = ctx.match.toString().toUpperCase().trim();
     if (!watchedStocks.includes(stock)) return ctx.reply("Bu hisse takipte değil.");
 
     watchedStocks = watchedStocks.filter(s => s !== stock);
-    fs.writeFileSync('stocks.json', JSON.stringify(watchedStocks));
-    ctx.reply(`${stock} takipten çıkarıldı.`);
+    // Cloud Save
+    ctx.reply(`${stock} takipten çıkarıldı. Bulut güncelleniyor...`);
+    await auth.saveWatchedStocks(watchedStocks);
 });
 
 bot.command("liste", (ctx) => {
@@ -338,6 +340,17 @@ bot.catch((err) => {
 (async () => {
     console.log("Bot starting...");
     await auth.startUserbot();
+
+    // Load Stocks from Cloud (Telegram Saved Messages)
+    console.log("☁️ Loading stocks from cloud...");
+    const cloudStocks = await auth.loadWatchedStocks();
+    if (cloudStocks.length > 0) {
+        watchedStocks = cloudStocks;
+        console.log(`✅ Loaded ${watchedStocks.length} stocks from cloud: ${watchedStocks.join(", ")}`);
+    } else {
+        console.log("ℹ️ No stocks found in cloud (or empty). Using defaults or empty list.");
+    }
+
     console.log("🤖 Starting Telegram Bot...");
 
     // Retry logic for bot authentication (Hugging Face network can be flaky)

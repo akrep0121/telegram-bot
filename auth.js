@@ -80,4 +80,54 @@ async function getFreshWebAppUrl() {
     }
 }
 
-module.exports = { startUserbot, getFreshWebAppUrl };
+// --- CLOUD PERSISTENCE (Saved Messages) ---
+// We use the Userbot's "Saved Messages" (peer: "me") to store the database.
+// This prevents cluttering the public channel.
+
+async function saveWatchedStocks(stocks) {
+    if (!client.connected) await startUserbot();
+    try {
+        const jsonStr = JSON.stringify(stocks);
+        const dbTag = "#DATABASE_V1";
+        const messageText = `${dbTag}\n${jsonStr}\n\nDO NOT DELETE THIS MESSAGE (Bot Memory)`;
+
+        // Search for existing DB message in Saved Messages
+        const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+        
+        if (history && history.length > 0) {
+            // Edit existing
+            await client.editMessage("me", { message: history[0].id, text: messageText });
+            console.log("Database updated in Saved Messages.");
+        } else {
+            // Create new
+            await client.sendMessage("me", { message: messageText });
+            console.log("New Database created in Saved Messages.");
+        }
+    } catch (e) {
+        console.error("Cloud Save Error:", e);
+    }
+}
+
+async function loadWatchedStocks() {
+    if (!client.connected) await startUserbot();
+    try {
+        const dbTag = "#DATABASE_V1";
+        const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+
+        if (history && history.length > 0) {
+            const text = history[0].text;
+            // Extract JSON (line 2)
+            const lines = text.split('\n');
+            if (lines.length >= 2) {
+                const data = JSON.parse(lines[1]);
+                console.log("Loaded stocks from Cloud:", data);
+                return data;
+            }
+        }
+    } catch (e) {
+        console.error("Cloud Load Error:", e);
+    }
+    return [];
+}
+
+module.exports = { startUserbot, getFreshWebAppUrl, saveWatchedStocks, loadWatchedStocks };
