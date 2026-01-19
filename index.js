@@ -136,7 +136,7 @@ async function sendStatusReport(isTest = false, targetChatId = null) {
             const status = isWeakening ? "⚠️ Lotlar Eriyor!" : "✅ Tavan Sağlam";
             msg += `🔹 ${stock}: ${fmtNum(cache.lastLot)} Lot (${status})\n`;
         } else {
-            msg += `🔹 ${stock}: Veri yok veya tavan değil.\n`;
+            msg += `🔹 ${stock}: Veri henüz alınamadı. (Sıradaki kontrolde çekilecek)\n`;
         }
     }
 
@@ -166,7 +166,23 @@ async function sendStatusReport(isTest = false, targetChatId = null) {
 // Commands
 bot.command("test", async (ctx) => {
     console.log("✅ RECEIVED /test command");
-    await ctx.reply("Test raporu hazırlanıyor...");
+
+    // If cache is empty, try a quick scrape for the first 2 stocks
+    if (Object.keys(marketCache).length === 0) {
+        await ctx.reply("Takip listesi boş veya veri henüz çekilmemiş. Hemen bir sorgu deniyorum...");
+        const url = await auth.getFreshWebAppUrl();
+        if (url && watchedStocks.length > 0) {
+            const stock = watchedStocks[0];
+            await ctx.reply(`${stock} için canlı sorgu başlatıldı...`);
+            const data = await scraper.fetchMarketData(url, stock);
+            if (data) {
+                marketCache[stock] = { history: [data.topBidLot], initialAvg: data.topBidLot, lastLot: data.topBidLot };
+            }
+        }
+    } else {
+        await ctx.reply("Mevcut veriler raporlanıyor...");
+    }
+
     await sendStatusReport(true, ctx.chat.id);
 });
 
