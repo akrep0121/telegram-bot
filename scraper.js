@@ -23,6 +23,7 @@ async function fetchMarketData(url, symbol) {
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
         // Step 2: Session Recovery (THE GHOST PROTOCOL)
+        // ONLY trigger if session is ACTUALLY expired - not just warning message
         console.log(`[GHOST] Checking for session expiration...`);
         const sessionRecovered = await page.evaluate(async () => {
             const multiClick = (el) => {
@@ -36,8 +37,12 @@ async function fetchMarketData(url, symbol) {
             };
 
             const bodyText = document.body.innerText;
-            if (bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Yeniden Bağlan') || bodyText.includes('Bağlantınız kesildi')) {
-                // Find reconnect button by various methods
+            // CRITICAL: Only check for ACTUAL session expiration messages
+            // NOT the initial "10 dakika" warning message
+            const isActuallyExpired = bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Bağlantınız kesildi');
+
+            if (isActuallyExpired) {
+                // Find reconnect button
                 const allElements = Array.from(document.querySelectorAll('button, div, span, a'));
 
                 // Method 1: Find by text content
