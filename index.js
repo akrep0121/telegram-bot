@@ -177,26 +177,31 @@ bot.command("test", async (ctx) => {
     }
 
     const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...\nLütfen bekleyin...`);
-    const url = await auth.getFreshWebAppUrl();
 
-    if (url) {
-        for (let i = 0; i < watchedStocks.length; i++) {
-            const stock = watchedStocks[i];
-            console.log(`[COLOSSUS] Scrape start: ${stock}`);
+    for (let i = 0; i < watchedStocks.length; i++) {
+        const stock = watchedStocks[i];
+        console.log(`[COLOSSUS] Scrape start: ${stock}`);
 
-            const data = await scraper.fetchMarketData(url, stock);
-            if (data && data.topBidLot > 0) {
-                marketCache[stock] = {
-                    history: [data.topBidLot],
-                    initialAvg: data.topBidLot,
-                    lastLot: data.topBidLot
-                };
-                await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n✅ ${stock} tamamlandı: ${fmtNum(data.topBidLot)} Lot`);
-            } else {
-                await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n⚠️ ${stock} verisi alınamadı.`);
-            }
-            await new Promise(r => setTimeout(r, 1000));
+        // Get FRESH URL for each stock (critical for session validity)
+        const url = await auth.getFreshWebAppUrl();
+        if (!url) {
+            console.error(`[ERROR] Could not get fresh URL for ${stock}`);
+            continue;
         }
+        console.log(`[AUTH] Fresh URL obtained for ${stock}`);
+
+        const data = await scraper.fetchMarketData(url, stock);
+        if (data && data.topBidLot > 0) {
+            marketCache[stock] = {
+                history: [data.topBidLot],
+                initialAvg: data.topBidLot,
+                lastLot: data.topBidLot
+            };
+            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n✅ ${stock} tamamlandı: ${fmtNum(data.topBidLot)} Lot`);
+        } else {
+            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n⚠️ ${stock} verisi alınamadı.`);
+        }
+        await new Promise(r => setTimeout(r, 1000));
     }
 
     await sendStatusReport(true, ctx.chat.id, true);
