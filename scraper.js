@@ -67,7 +67,28 @@ async function fetchMarketData(url, symbol) {
             console.log(`[GHOST] Reconnect button clicked! Reloading page...`);
             await new Promise(r => setTimeout(r, 3000));
             await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
-            console.log(`[GHOST] Page reloaded. Waiting for app shell...`);
+            console.log(`[GHOST] Page reloaded. Checking page state...`);
+
+            // Dump page state after reload
+            const postReloadDump = await page.evaluate(() => document.body.innerText.slice(0, 300));
+            console.log(`[GHOST POST-RELOAD] Body: ${postReloadDump.replace(/\s+/g, ' ').slice(0, 200)}`);
+
+            // Second session check - if still showing session expired, try clicking again
+            const stillExpired = await page.evaluate(() => {
+                const bodyText = document.body.innerText;
+                return bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Yeniden Bağlan');
+            });
+
+            if (stillExpired) {
+                console.log(`[GHOST] Session STILL expired after reload! Trying reconnect again...`);
+                await page.evaluate(() => {
+                    const btns = Array.from(document.querySelectorAll('button, div, span, a'));
+                    const reconnectBtn = btns.find(b => (b.innerText || "").toLowerCase().includes('yeniden'));
+                    if (reconnectBtn) reconnectBtn.click();
+                });
+                await new Promise(r => setTimeout(r, 5000));
+            }
+
             await new Promise(r => setTimeout(r, 5000));
         } else if (sessionRecovered === "not_found") {
             console.log(`[GHOST] Session issue detected but reconnect button NOT found.`);
@@ -76,6 +97,7 @@ async function fetchMarketData(url, symbol) {
         // Step 3: Wait for App Shell Stabilization
         try {
             await page.waitForSelector('#addSymbolInput, #searchInput, input[placeholder*="Ara"]', { timeout: 20000 });
+            console.log(`[GHOST] Search input found! Ready to search.`);
         } catch (e) {
             console.warn(`[GHOST WARNING] Search input still not found. Dumping diagnostic...`);
             const dump = await page.evaluate(() => document.body.innerText.slice(0, 500));
