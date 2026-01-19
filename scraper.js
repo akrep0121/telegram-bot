@@ -81,6 +81,10 @@ async function fetchMarketData(url, symbol) {
             return null; // Signals to get new URL
         }
 
+        // DEBUG: Log page content right after navigation
+        const pagePreview = await page.evaluate(() => document.body.innerText.substring(0, 400).replace(/\n/g, ' '));
+        console.log(`[DEBUG] Page after nav: ${pagePreview}`);
+
         // console.log(`Searching for ${symbol}...`);
 
         // NAVIGATION
