@@ -34,6 +34,7 @@ let watchedStocks = []; // ['SASA', 'THYAO']
 let marketCache = {};   // { 'SASA': { lastLot: 5000, history: [...] } }
 let isCheckRunning = false;
 let lastHeartbeatMin = -1;
+let isBotActive = true; // Control flag for bot activity
 
 // Middleware: Admin Check
 // To lock the bot to YOU only, we need your Telegram User ID.
@@ -57,6 +58,23 @@ bot.use(async (ctx, next) => {
 
 // Commands
 bot.command("start", (ctx) => ctx.reply(`Bot çalışıyor! Sizin ID'niz: ${ctx.from.id}\nBu ID'yi Render.com'da ADMIN_ID olarak eklerseniz bot kilitlenir.`));
+
+bot.command("pasif", (ctx) => {
+    isBotActive = false;
+    ctx.reply("⏸️ Bot PASİF moda alındı. Otomatik veri çekme durduruldu.");
+    console.log("[SYSTEM] Bot set to PASSIVE mode.");
+});
+
+bot.command("aktif", (ctx) => {
+    isBotActive = true;
+    ctx.reply("▶️ Bot AKTİF moda alındı. Otomatik veri çekme başlatılıyor...");
+    console.log("[SYSTEM] Bot set to ACTIVE mode.");
+
+    // Trigger immediate check if not running
+    if (!isCheckRunning) {
+        checkMarket();
+    }
+});
 
 bot.command("ekle", async (ctx) => {
     const stock = ctx.match.toString().toUpperCase().trim();
@@ -209,6 +227,12 @@ bot.command("test", async (ctx) => {
 
 // Main Loop
 async function checkMarket() {
+    // 0. Check if Bot is Active
+    if (!isBotActive) {
+        // console.log("[SYSTEM] Bot is PASSIVE. Skipping check.");
+        return;
+    }
+
     if (isCheckRunning) return;
 
     const trNow = getTrTime();
