@@ -85,33 +85,45 @@ async function fetchMarketData(url, symbol) {
 
         // NAVIGATION
         const searchInputSelector = '#addSymbolInput';
-        try {
-            await page.waitForSelector(searchInputSelector, { timeout: 10000 });
-            await page.type(searchInputSelector, symbol, { delay: 100 });
-            await page.keyboard.press('Enter');
-        } catch (e) {
-            // First fallback
-            try {
-                await page.waitForSelector('#searchInput', { timeout: 5000 });
-                await page.type('#searchInput', symbol, { delay: 100 });
-                await page.keyboard.press('Enter');
-            } catch (err2) {
-                console.log("CRITICAL: No search input found! Dumping page content...");
-                const html = await page.content();
-                // Print first 500 chars of body to log for immediate visibility in HF logs
-                const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500).replace(/\n/g, ' '));
-                console.log("PAGE PREVIEW:", bodyText);
+        const fallbackSearchSelector = '#searchInput';
 
-                // Also save to file (though user might not see it easily in HF, helpful if they download)
-                fs.writeFileSync('error_no_input.html', html);
-                throw new Error("No search input found on page.");
+        let searchAttempt = 0;
+        let searchSuccess = false;
+
+        while (searchAttempt < 2 && !searchSuccess) {
+            try {
+                const targetSelector = await page.waitForSelector(`${searchInputSelector}, ${fallbackSearchSelector}`, { timeout: 10000 });
+
+                // Focus and clear input
+                await page.click(searchInputSelector).catch(() => page.click(fallbackSearchSelector));
+                await page.keyboard.down('Control');
+                await page.keyboard.press('A');
+                await page.keyboard.up('Control');
+                await page.keyboard.press('Backspace');
+
+                // Type with delay
+                await page.type(searchInputSelector, symbol, { delay: 100 }).catch(() => page.type(fallbackSearchSelector, symbol, { delay: 100 }));
+                await page.keyboard.press('Enter');
+                searchSuccess = true;
+            } catch (e) {
+                searchAttempt++;
+                console.log(`Search attempt ${searchAttempt} failed for ${symbol}. Retrying...`);
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
 
+        if (!searchSuccess) {
+            console.log("CRITICAL: No search input found! Dumping page content...");
+            const html = await page.content();
+            const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500).replace(/\n/g, ' '));
+            console.log("PAGE PREVIEW:", bodyText);
+            fs.writeFileSync('error_no_input.html', html);
+            throw new Error("No search input found on page.");
+        }
+
         // Wait for search results
-        // Results might take a moment to refresh after Enter
+        await new Promise(r => setTimeout(r, 2500)); // Longer wait for results to populate
         await page.waitForSelector('#searchResults', { visible: true, timeout: 5000 }).catch(() => console.log("Results container wait timeout, assuming open."));
-        await new Promise(r => setTimeout(r, 2000));
 
         // Find specific stock in results
         const found = await page.evaluate((sym) => {
@@ -150,19 +162,42 @@ async function fetchMarketData(url, symbol) {
             console.log(`Clicked result for ${symbol}.`);
         }
 
-        // Wait for Detail View
+        // Wait for Detail View (Check for multiple possible signs of detail view)
         try {
-            await page.waitForSelector('#detailView.view.active', { timeout: 10000 });
+            await page.waitForFunction(
+                () => {
+                    const detail = document.querySelector('#detailView');
+                    const depthTab = document.querySelector('button[data-tab="derinlik"]');
+                    return (detail && detail.classList.contains('active')) || depthTab;
+                },
+                { timeout: 12000 }
+            );
         } catch (e) {
-            console.log("Detail view did not appear. Dumping state...");
+            console.log("Detail view did not appear after click. Last HTML preview:");
+            const preview = await page.evaluate(() => document.body.innerText.substring(0, 300));
+            console.log("PREVIEW:", preview);
             await page.screenshot({ path: 'detail_fail_debug.png' });
-            throw e;
+            throw new Error(`Detail view for ${symbol} failed to activate.`);
         }
 
         // Click "Derinlik" tab
         const depthTabSelector = 'button[data-tab="derinlik"]';
-        await page.waitForSelector(depthTabSelector);
-        await page.click(depthTabSelector);
+        try {
+            await page.waitForSelector(depthTabSelector, { timeout: 5000 });
+            await page.click(depthTabSelector);
+        } catch (e) {
+            console.log("Depth tab not found. Trying to find by text...");
+            const clicked = await page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button, div, span'));
+                const depthBtn = buttons.find(b => b.innerText.toLowerCase().includes('derinlik'));
+                if (depthBtn) {
+                    depthBtn.click();
+                    return true;
+                }
+                return false;
+            });
+            if (!clicked) throw new Error("Could not find Derinlik tab.");
+        }
 
         // Wait for depth data - INCREASED WAIT FOR SLOW SERVERS
         await new Promise(r => setTimeout(r, 3000));

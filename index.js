@@ -61,8 +61,7 @@ bot.command("ekle", async (ctx) => {
 
     watchedStocks.push(stock);
     // Cloud Save
-    ctx.reply(`${stock} takibe alındı. Buluta kaydediliyor...`);
-    await auth.saveWatchedStocks(watchedStocks);
+    await updatePersistence(`${stock} takibe alındı.`, ctx);
 });
 
 bot.command("sil", async (ctx) => {
@@ -71,14 +70,24 @@ bot.command("sil", async (ctx) => {
 
     watchedStocks = watchedStocks.filter(s => s !== stock);
     // Cloud Save
-    ctx.reply(`${stock} takipten çıkarıldı. Bulut güncelleniyor...`);
-    await auth.saveWatchedStocks(watchedStocks);
+    await updatePersistence(`${stock} takipten çıkarıldı.`, ctx);
 });
 
 bot.command("liste", (ctx) => {
     if (watchedStocks.length === 0) return ctx.reply("Takip listeniz boş.");
     ctx.reply(`Takip edilenler: ${watchedStocks.join(", ")}`);
 });
+
+// Update the cache/persistence whenever it changes
+async function updatePersistence(msg, ctx) {
+    try {
+        await auth.saveWatchedStocks(watchedStocks);
+        if (ctx) await ctx.reply(msg);
+    } catch (e) {
+        console.error("Persistence error:", e);
+        if (ctx) await ctx.reply("⚠️ Liste güncellendi ama buluta kaydedilirken hata oluştu.");
+    }
+}
 
 // Helper for formatting numbers
 const fmtNum = (num) => new Intl.NumberFormat('en-US').format(num);
@@ -379,8 +388,12 @@ bot.catch((err) => {
 
     bot.start(); // Non-blocking, runs in background
     console.log("✅ Bot is now listening for commands");
-    checkMarket(); // Initial call
+
+    // Final check to make sure loop hasn't started yet
+    if (!isCheckRunning) {
+        checkMarket();
+    }
 })();
 
-// Initial Trigger for testing immediately
-setTimeout(checkMarket, 5000);
+// Remove the second setTimeout to avoid race condition
+// setTimeout(checkMarket, 5000);
