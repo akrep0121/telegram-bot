@@ -63,37 +63,22 @@ async function getFreshWebAppUrl() {
     }
 
     try {
-        // Request WebView from bot's menu (most reliable method)
+        // Request WebView with URL (required for this bot)
         const result = await client.invoke(
             new Api.messages.RequestWebView({
                 peer: config.TARGET_BOT_USERNAME,
                 bot: config.TARGET_BOT_USERNAME,
                 platform: "android",
-                fromBotMenu: true
+                fromBotMenu: false,
+                url: "https://7k2v9x1r0z8t4m3n5p7w.com/"
             })
         );
 
-        console.log(`[AUTH] Got WebApp URL: ${result.url.substring(0, 80)}...`);
+        console.log(`[AUTH] Got WebApp URL: ${result.url.substring(0, 100)}...`);
         return result.url;
     } catch (error) {
-        console.error("[AUTH] Error (Method 1):", error.message);
-
-        // Fallback: Try without fromBotMenu
-        try {
-            const fallback = await client.invoke(
-                new Api.messages.RequestWebView({
-                    peer: config.TARGET_BOT_USERNAME,
-                    bot: config.TARGET_BOT_USERNAME,
-                    platform: "android",
-                    fromBotMenu: false
-                })
-            );
-            console.log(`[AUTH] Got fallback URL: ${fallback.url.substring(0, 80)}...`);
-            return fallback.url;
-        } catch (e2) {
-            console.error("[AUTH] Fallback also failed:", e2.message);
-            return null;
-        }
+        console.error("[AUTH] Error getting WebApp URL:", error.message);
+        return null;
     }
 }
 
