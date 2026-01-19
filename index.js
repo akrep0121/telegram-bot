@@ -33,6 +33,7 @@ const bot = new Bot(config.BOT_TOKEN, {
 let watchedStocks = []; // ['SASA', 'THYAO']
 let marketCache = {};   // { 'SASA': { lastLot: 5000, history: [...] } }
 let isCheckRunning = false;
+let lastHeartbeatMin = -1;
 
 // Middleware: Admin Check
 // To lock the bot to YOU only, we need your Telegram User ID.
@@ -168,30 +169,27 @@ async function sendStatusReport(isTest = false, targetChatId = null) {
 
 // Commands
 bot.command("test", async (ctx) => {
-    console.log("✅ RECEIVED /test command");
+    console.log(`[COMMAND] RECEIVED /test from ${ctx.from.id} on Instance ${INSTANCE_ID}`);
 
     const firstStock = watchedStocks[0];
-    const cache = marketCache[firstStock];
-
-    if (!cache || cache.lastLot === 0) {
-        if (watchedStocks.length > 0) {
-            await ctx.reply(`Takip listesi hazır. ${firstStock} için canlı veriyi şimdi çekiyorum...`);
-            const url = await auth.getFreshWebAppUrl();
-            if (url) {
-                const data = await scraper.fetchMarketData(url, firstStock);
-                if (data) {
-                    marketCache[firstStock] = {
-                        history: [data.topBidLot],
-                        initialAvg: data.topBidLot,
-                        lastLot: data.topBidLot
-                    };
-                }
+    if (watchedStocks.length > 0) {
+        await ctx.reply(`🔍 [ID: ${INSTANCE_ID}] Canlı veri kontrolü başlatıldı: ${firstStock}...`);
+        const url = await auth.getFreshWebAppUrl();
+        if (url) {
+            const data = await scraper.fetchMarketData(url, firstStock);
+            if (data && data.topBidLot > 0) {
+                marketCache[firstStock] = {
+                    history: [data.topBidLot],
+                    initialAvg: data.topBidLot,
+                    lastLot: data.topBidLot
+                };
+                await ctx.reply(`✅ Veri başarıyla çekildi: ${fmtNum(data.topBidLot)} Lot`);
+            } else {
+                await ctx.reply(`⚠️ Veri çekilemedi veya lot değeri 0 geldi. Sayfa tam yüklenmemiş olabilir.`);
             }
-        } else {
-            return ctx.reply("Takip listeniz boş. Önce /ekle ile hisse ekleyin.");
         }
     } else {
-        await ctx.reply("Sistem aktif, mevcut tavan verileri raporlanıyor...");
+        return ctx.reply("Takip listeniz boş.");
     }
 
     await sendStatusReport(true, ctx.chat.id);
@@ -208,6 +206,10 @@ async function checkMarket() {
     const dateStr = `${(trNow.getUTCMonth() + 1).toString().padStart(2, '0')}-${trNow.getUTCDate().toString().padStart(2, '0')}`;
 
     const currentTimeVal = hours * 100 + minutes;
+    if (currentTimeVal % 5 === 0 && minutes !== lastHeartbeatMin) {
+        console.log(`[HEARTBEAT] Instance ${INSTANCE_ID} is alive. Time: ${trNow.toISOString()}, Stocks: ${watchedStocks.length}`);
+        lastHeartbeatMin = minutes;
+    }
 
     // Weekend and Holiday Check
     const isWeekend = (day === 0 || day === 6);
