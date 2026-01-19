@@ -17,81 +17,96 @@ async function fetchMarketData(url, symbol) {
         // Step 1: Navigate
         console.log(`[SCRAPER] ${symbol} - Navigating...`);
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, 3000));
 
-        // Step 2: CRITICAL - Dismiss the "10 dakika" warning modal
-        console.log(`[SCRAPER] ${symbol} - Dismissing warning modal...`);
+        // Step 2: Check if session is ACTUALLY expired vs just info modal
+        console.log(`[SCRAPER] ${symbol} - Checking page state...`);
+        const pageState = await page.evaluate(() => {
+            const bodyText = document.body.innerText;
+            const hasExpiredSession = bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Bağlantınız kesildi');
+            const hasWarningModal = bodyText.includes('10 dakika boyunca');
+            return { hasExpiredSession, hasWarningModal, sample: bodyText.slice(0, 200) };
+        });
 
-        // Try multiple dismiss methods
-        for (let attempt = 0; attempt < 3; attempt++) {
+        console.log(`[DIAGNOSTIC] ${symbol} State: expired=${pageState.hasExpiredSession}, warning=${pageState.hasWarningModal}`);
+
+        // Step 3: Handle based on state
+        if (pageState.hasExpiredSession) {
+            // Session is expired - click Yeniden Bağlan
+            console.log(`[SCRAPER] ${symbol} - Session expired, clicking reconnect...`);
+            await page.evaluate(() => {
+                const btns = Array.from(document.querySelectorAll('button, a, div, span'));
+                const reconnect = btns.find(b => (b.innerText || "").toLowerCase().includes('yeniden bağlan'));
+                if (reconnect) reconnect.click();
+            });
+            await new Promise(r => setTimeout(r, 5000));
+        } else if (pageState.hasWarningModal) {
+            // Just a warning modal - try to dismiss it
+            console.log(`[SCRAPER] ${symbol} - Dismissing warning modal...`);
+
+            // Try 1: Press Enter to accept
+            await page.keyboard.press('Enter');
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Try 2: Click positive buttons (NOT yeniden)
             const dismissed = await page.evaluate(() => {
-                // Common Turkish button texts for dismissing modals
-                const dismissTexts = [
-                    'anladım', 'anladim', 'tamam', 'devam', 'başla', 'basla',
-                    'kabul', 'uygula', 'giriş', 'giris', 'onayla',
-                    'ok', 'continue', 'start', 'accept', 'başlat', 'baslat',
-                    'kapat', 'gir', 'aç', 'ac', 'giriş yap', 'bağlan', 'baglan'
-                ];
+                const positiveTexts = ['anladım', 'anladim', 'tamam', 'devam', 'başla', 'basla', 'kabul', 'onayla', 'gir', 'aç'];
+                const btns = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"]'));
 
-                const allClickable = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"], .btn, .button'));
-
-                for (const btn of allClickable) {
+                for (const btn of btns) {
                     const txt = (btn.innerText || "").toLowerCase().trim();
-                    for (const dismissText of dismissTexts) {
-                        if (txt === dismissText || txt.includes(dismissText)) {
+                    // Skip if contains "yeniden" - that's the reconnect button
+                    if (txt.includes('yeniden')) continue;
+
+                    for (const positiveText of positiveTexts) {
+                        if (txt === positiveText || txt.includes(positiveText)) {
                             btn.click();
-                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             return `clicked: ${txt}`;
                         }
                     }
                 }
-
-                // If no text match, try clicking visible buttons
-                const visibleButtons = allClickable.filter(el => {
-                    const rect = el.getBoundingClientRect();
-                    return rect.width > 50 && rect.height > 20 && rect.top > 0;
-                });
-
-                if (visibleButtons.length > 0) {
-                    visibleButtons[0].click();
-                    return `clicked first visible button`;
-                }
-
-                return "no_button_found";
+                return "no_positive_button";
             });
-
-            console.log(`[SCRAPER] ${symbol} - Modal dismiss attempt ${attempt + 1}: ${dismissed}`);
-
-            if (dismissed.includes("clicked")) {
-                await new Promise(r => setTimeout(r, 3000));
-                break;
-            }
+            console.log(`[SCRAPER] ${symbol} - Modal dismiss: ${dismissed}`);
             await new Promise(r => setTimeout(r, 2000));
+
+            // Try 3: Press Escape
+            await page.keyboard.press('Escape');
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Try 4: Click outside the modal (on overlay)
+            await page.mouse.click(10, 10);
+            await new Promise(r => setTimeout(r, 1000));
         }
 
-        // Check if modal is gone
-        const afterDismiss = await page.evaluate(() => document.body.innerText.slice(0, 200));
-        console.log(`[DIAGNOSTIC] ${symbol} AFTER DISMISS: ${afterDismiss.replace(/\s+/g, ' ').slice(0, 150)}`);
+        // Wait for app to stabilize
+        await new Promise(r => setTimeout(r, 3000));
 
-        // Step 3: Find and use search input
+        // Check current state
+        const afterState = await page.evaluate(() => document.body.innerText.slice(0, 300));
+        console.log(`[DIAGNOSTIC] ${symbol} AFTER MODAL: ${afterState.replace(/\s+/g, ' ').slice(0, 150)}`);
+
+        // Step 4: Search for symbol
         console.log(`[SCRAPER] ${symbol} - Searching...`);
         const inputSelector = '#addSymbolInput, #searchInput, input[placeholder*="Ara"], input[type="text"], input[type="search"]';
 
-        let inputFound = false;
         try {
             await page.waitForSelector(inputSelector, { timeout: 10000 });
-            inputFound = true;
         } catch (e) {
-            console.log(`[SCRAPER] ${symbol} - Search input NOT found!`);
-        }
+            // Try to find any input
+            const anyInput = await page.evaluate(() => {
+                const inputs = document.querySelectorAll('input');
+                return inputs.length;
+            });
+            console.log(`[SCRAPER] ${symbol} - Search input not found! Total inputs on page: ${anyInput}`);
 
-        if (!inputFound) {
-            const bodyDump = await page.evaluate(() => document.body.innerText.slice(0, 400));
-            console.log(`[DIAGNOSTIC] ${symbol} NO INPUT - Body: ${bodyDump.replace(/\s+/g, ' ').slice(0, 200)}`);
+            // Dump full page for debugging
+            const fullBody = await page.evaluate(() => document.body.innerText);
+            console.log(`[DEBUG] ${symbol} - Full body (${fullBody.length} chars): ${fullBody.replace(/\s+/g, ' ').slice(0, 400)}`);
             return null;
         }
 
-        await page.focus(inputSelector);
+        // Click and type
         await page.click(inputSelector);
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyA');
@@ -102,47 +117,50 @@ async function fetchMarketData(url, symbol) {
         await page.keyboard.press('Enter');
         await new Promise(r => setTimeout(r, 3000));
 
-        // Step 4: Click on symbol result
+        // Step 5: Click on search result
         console.log(`[SCRAPER] ${symbol} - Clicking result...`);
         const clicked = await page.evaluate((s) => {
-            const allElements = Array.from(document.querySelectorAll('div, span, a, li'));
-            const match = allElements.find(el => {
-                const text = (el.innerText || "").trim().toUpperCase();
-                return text === s || text.includes(s + " ") || text.includes(s + "\n") || text.startsWith(s);
+            // Look for elements containing the symbol
+            const all = Array.from(document.querySelectorAll('*'));
+            const match = all.find(el => {
+                const text = (el.innerText || "").trim();
+                const lines = text.split('\n');
+                return lines.some(line => {
+                    const upper = line.toUpperCase().trim();
+                    return upper === s || upper.startsWith(s + " ") || upper.startsWith(s + "\t");
+                });
             });
             if (match) {
                 match.click();
-                return "found_" + match.innerText.slice(0, 20);
+                return "clicked";
+            }
+
+            // Fallback: click first result-like element
+            const result = document.querySelector('#searchResults div, .result, [class*="result"], [class*="item"]');
+            if (result) {
+                result.click();
+                return "fallback";
             }
             return "not_found";
         }, symbol);
-
-        console.log(`[SCRAPER] ${symbol} - Click result: ${clicked}`);
-
-        if (clicked === "not_found") {
-            await page.evaluate(() => {
-                const first = document.querySelector('#searchResults div, .search-row, .result-item');
-                if (first) first.click();
-            });
-        }
-
+        console.log(`[SCRAPER] ${symbol} - Result click: ${clicked}`);
         await new Promise(r => setTimeout(r, 4000));
 
-        // Step 5: Open Depth Tab
+        // Step 6: Open Depth Tab
         console.log(`[SCRAPER] ${symbol} - Opening depth tab...`);
         await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll('button, div, span, a, [role="tab"]'));
-            const depthBtn = btns.find(b => {
-                const txt = (b.innerText || "").toLowerCase();
-                return txt.includes('derinlik') || txt.includes('depth');
+            const all = Array.from(document.querySelectorAll('*'));
+            const depthBtn = all.find(el => {
+                const txt = (el.innerText || "").toLowerCase();
+                return txt === 'derinlik' || txt.includes('derinlik');
             });
             if (depthBtn) depthBtn.click();
         });
         await new Promise(r => setTimeout(r, 4000));
 
-        // Step 6: Extract data
-        console.log(`[SCRAPER] ${symbol} - Extracting data...`);
-        const data = await page.evaluate((sym) => {
+        // Step 7: Extract data
+        console.log(`[SCRAPER] ${symbol} - Extracting...`);
+        const data = await page.evaluate(() => {
             const parseNum = (s) => parseInt((s || "").replace(/\D/g, ''), 10) || 0;
             const maskTime = (s) => (s || "").replace(/\d{1,2}[:.]\d{2}/g, ' ');
 
@@ -150,19 +168,22 @@ async function fetchMarketData(url, symbol) {
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 3);
 
             const months = ["ocak", "subat", "mart", "nisan", "mayis", "haziran", "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik"];
-            const isHeader = (l) => /Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa|Saat|Toplam/i.test(l);
-            const isDate = (l) => months.some(m => l.toLowerCase().includes(m)) || /2024|2025|2026|2027/.test(l);
+            const isSkip = (l) => {
+                const low = l.toLowerCase();
+                return /Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa|Saat|Toplam|dakika|telegram/i.test(l) ||
+                    months.some(m => low.includes(m)) ||
+                    /2024|2025|2026|2027/.test(l);
+            };
 
             let maxLot = 0;
             let bestRow = "";
 
             lines.forEach((line) => {
-                if (isHeader(line) || isDate(line)) return;
+                if (isSkip(line)) return;
 
                 const maskedLine = maskTime(line);
-                const numbers = (maskedLine.match(/\d+/g) || []).map(n => parseNum(n));
-                const validNums = numbers.filter(n => n > 100 && n < 50000000);
-                const safeNums = validNums.filter(n => n !== 1800 && n !== 900 && n !== 1730 && n !== 930);
+                const numbers = (maskedLine.match(/\d{3,}/g) || []).map(n => parseNum(n));
+                const safeNums = numbers.filter(n => n > 500 && n < 50000000 && n !== 1800 && n !== 900);
 
                 if (safeNums.length > 0) {
                     const localMax = Math.max(...safeNums);
@@ -173,20 +194,16 @@ async function fetchMarketData(url, symbol) {
                 }
             });
 
-            return {
-                topBidLot: maxLot,
-                bestRow: bestRow,
-                price: document.getElementById('lastPrice')?.innerText || "0",
-                ceiling: document.getElementById('infoCeiling')?.innerText || "0"
-            };
-        }, symbol);
+            return { topBidLot: maxLot, bestRow, lineCount: lines.length };
+        });
 
-        console.log(`[SCRAPER] ${symbol} -> Lot: ${data.topBidLot} (Row: "${data.bestRow.slice(0, 40)}")`);
+        console.log(`[SCRAPER] ${symbol} -> Lot: ${data.topBidLot}, Lines: ${data.lineCount}`);
+        if (data.bestRow) console.log(`[SCRAPER] ${symbol} - Best row: "${data.bestRow.slice(0, 50)}"`);
 
         return {
             symbol,
-            priceStr: data.price,
-            ceilingStr: data.ceiling,
+            priceStr: "0",
+            ceilingStr: "0",
             topBidLot: data.topBidLot,
             isCeiling: data.topBidLot > 0
         };
