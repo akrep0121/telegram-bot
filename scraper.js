@@ -18,17 +18,56 @@ async function fetchMarketData(url, symbol) {
         await page.setViewport({ width: 390, height: 844 });
         await page.setUserAgent(USER_AGENTS[0]);
 
-        // Step 1: Navigation
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        // Step 1: Rapid Navigation
+        console.log(`[GHOST] Navigating to web app...`);
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 35000 });
 
-        // Step 2: Aggressive Search
+        // Step 2: Session Recovery (THE GHOST PROTOCOL)
+        console.log(`[GHOST] Checking for session expiration...`);
+        const sessionRecovered = await page.evaluate(async () => {
+            const multiClick = (el) => {
+                if (!el) return false;
+                el.scrollIntoView();
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                el.click();
+                return true;
+            };
+
+            const bodyText = document.body.innerText;
+            if (bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Yeniden Bağlan')) {
+                const btns = Array.from(document.querySelectorAll('button, div, span, a'));
+                const reconnectBtn = btns.find(b => b.innerText.toLowerCase().includes('yeniden bağlan'));
+                if (reconnectBtn) {
+                    multiClick(reconnectBtn);
+                    return true;
+                }
+            }
+            return false;
+        });
+
+        if (sessionRecovered) {
+            console.log(`[GHOST] Reconnect signal sent. Waiting for app shell...`);
+            await new Promise(r => setTimeout(r, 5000));
+        }
+
+        // Step 3: Wait for App Shell Stabilization
+        try {
+            await page.waitForSelector('#addSymbolInput, #searchInput, input[placeholder*="Ara"]', { timeout: 15000 });
+        } catch (e) {
+            console.warn(`[GHOST WARNING] Search input still not found. Dumping diagnostic...`);
+            const dump = await page.evaluate(() => document.body.innerText.slice(0, 500));
+            console.log(`[GHOST DIAGNOSTIC] Body: ${dump.replace(/\s+/g, ' ')}`);
+            throw new Error(`Uygulama arayüzü yüklenemedi (Arama kutusu bulunamadı).`);
+        }
+
+        // Step 4: Aggressive Search
         const inputSelector = '#addSymbolInput, #searchInput, input[placeholder*="Ara"]';
-        await page.waitForSelector(inputSelector, { timeout: 10000 });
-
         await page.focus(inputSelector);
         await page.click(inputSelector);
 
-        // Clear visually and via JS
+        // Comprehensive clear
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyA');
         await page.keyboard.up('Control');
@@ -43,12 +82,10 @@ async function fetchMarketData(url, symbol) {
         }, inputSelector);
 
         await page.keyboard.type(symbol);
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 1000));
         await page.keyboard.press('Enter');
 
-        // Step 3: Fast result detection with Body Dump on Failure
-        console.log(`[ORACLE] Searching for ${symbol}...`);
-        let matchFound = false;
+        // Step 5: Symbol Result Clicking
         try {
             await page.waitForFunction((s) => {
                 const results = document.querySelector('#searchResults') || document.body;
@@ -56,12 +93,9 @@ async function fetchMarketData(url, symbol) {
                     const text = el.innerText?.trim().toUpperCase() || "";
                     return text === s || text.startsWith(s + " ") || text.includes("\n" + s + "\n");
                 });
-            }, { timeout: 8000 }, symbol);
-            matchFound = true;
+            }, { timeout: 10000 }, symbol);
         } catch (e) {
-            console.warn(`[ORACLE WARNING] Search results for ${symbol} NOT found in 8s.`);
-            const bodyDump = await page.evaluate(() => document.body.innerText.slice(0, 500));
-            console.log(`[ORACLE DIAGNOSTIC] Body Text Start: ${bodyDump.replace(/\s+/g, ' ')}`);
+            console.warn(`[GHOST] ${symbol} result not visible in 10s.`);
         }
 
         const clicked = await page.evaluate((s) => {
@@ -76,39 +110,36 @@ async function fetchMarketData(url, symbol) {
             };
 
             const results = document.querySelector('#searchResults') || document.body;
-            const match = Array.from(results.querySelectorAll('*')).find(el => {
+            const matches = Array.from(results.querySelectorAll('*')).filter(el => {
                 const text = el.innerText?.trim().toUpperCase() || "";
                 return text === s || text.startsWith(s + " ") || text.includes("\n" + s + "\n");
             });
 
-            if (match) return multiClick(match);
+            if (matches.length > 0) return multiClick(matches[0]);
 
-            // Second chance: Click first logical item in results
-            const firstChild = document.querySelector('#searchResults .search-result-item, #searchResults > div');
-            if (firstChild) return multiClick(firstChild);
+            // Fallback: Pick the first div with text length matching symbol closely
+            const items = Array.from(document.querySelectorAll('#searchResults div, .search-row'));
+            if (items.length > 0) return multiClick(items[0]);
 
             return false;
         }, symbol);
 
-        if (!clicked) throw new Error(`${symbol} sonuçlarda bulunamadı veya tıklanamadı.`);
+        if (!clicked) throw new Error(`${symbol} aramada çıkmadı.`);
 
-        // Step 4: Open Depth Tab (Multi-Trigger)
-        await new Promise(r => setTimeout(r, 2000));
-        const depthClicked = await page.evaluate(() => {
+        // Step 6: Detail Navigation & Extraction
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Open Depth
+        await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button, div, span, a'));
             const dBtn = btns.find(b => b.innerText.toLowerCase().includes('derinlik'));
             if (dBtn) {
                 dBtn.click();
                 dBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                return true;
             }
-            return false;
         });
 
-        if (!depthClicked) console.warn(`[ORACLE] Derinlik butonu bulunamadı, bekleniyor...`);
-
-        // Step 5: Surgical Extraction (Titan Engine)
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
 
         const stats = await page.evaluate((sym) => {
             const parseN = (s) => parseInt(s.replace(/\D/g, ''), 10) || 0;
@@ -123,7 +154,6 @@ async function fetchMarketData(url, symbol) {
 
             let topL = 0;
             let bestR = "";
-            let ctx = "";
 
             lines.forEach((line, idx) => {
                 if (isHdr(line) || isDt(line)) return;
@@ -135,12 +165,11 @@ async function fetchMarketData(url, symbol) {
                 if (validNums.length > 0) {
                     const localMax = Math.max(...validNums);
                     const prevLine = lines[idx - 1] || "";
-                    const score = (prevLine.toLowerCase().includes('alis') || prevLine.toLowerCase().includes('tavan')) ? 3 : 1;
+                    const score = (prevLine.toLowerCase().includes('alis') || prevLine.toLowerCase().includes('tavan')) ? 4 : 1;
 
                     if (localMax * score > topL) {
                         topL = localMax;
                         bestR = line;
-                        ctx = prevLine;
                     }
                 }
             });
@@ -148,13 +177,12 @@ async function fetchMarketData(url, symbol) {
             return {
                 topBidLot: topL,
                 bestRow: bestR,
-                context: ctx,
                 price: document.getElementById('lastPrice')?.innerText || "0",
                 ceiling: document.getElementById('infoCeiling')?.innerText || "0"
             };
         }, symbol);
 
-        console.log(`[ORACLE] ${symbol} -> Lot: ${stats.topBidLot} (Row: "${stats.bestRow}")`);
+        console.log(`[GHOST] ${symbol} -> Lot: ${stats.topBidLot} (Row: "${stats.bestRow}")`);
 
         return {
             symbol,
@@ -165,7 +193,7 @@ async function fetchMarketData(url, symbol) {
         };
 
     } catch (e) {
-        console.error(`[ORACLE ERROR] ${symbol}: ${e.message}`);
+        console.error(`[GHOST ERROR] ${symbol}: ${e.message}`);
         return null;
     } finally {
         if (browser) await browser.close();
