@@ -272,13 +272,40 @@ async function fetchMarketData(url, symbol) {
                 return parseFloat(clean.replace(/[,.]/g, '')) || 0;
             };
 
-            const priceStr = getTxt('lastPrice');
-            const ceilingStr = getTxt('infoCeiling');
+            let priceStr = getTxt('lastPrice');
+            let ceilingStr = getTxt('infoCeiling');
+
+            // --- SMART FALLBACK FOR PRICE/CEILING ---
+            if (!priceStr || priceStr === "--" || priceStr === "") {
+                const allDivs = Array.from(document.querySelectorAll('div, span, b, p'));
+                const priceLabel = allDivs.find(d => {
+                    const t = d.innerText;
+                    return t && (t.includes('Son Fiyat') || t.includes('Fiyat:'));
+                });
+                if (priceLabel && priceLabel.nextElementSibling) priceStr = priceLabel.nextElementSibling.innerText;
+            }
 
             // Refined Depth Row Selection
-            const rows = Array.from(document.querySelectorAll('#depthContent .depth-row:not(.skeleton-row)'));
+            let rows = Array.from(document.querySelectorAll('#depthContent .depth-row:not(.skeleton-row)'));
+
+            // --- SMART FALLBACK FOR ROWS ---
+            if (rows.length === 0) {
+                // Find ANY element that contains "Alış" and "Lot"
+                const depthArea = Array.from(document.querySelectorAll('div, table, section')).find(el => {
+                    const t = el.innerText;
+                    return t && t.includes('Alış') && t.includes('Lot');
+                });
+                if (depthArea) {
+                    rows = Array.from(depthArea.querySelectorAll('div, tr, .row')).filter(r => {
+                        const txt = r.innerText;
+                        // Looks like a row with 3 segments: [Price] [Lot] [Count]
+                        return txt && /\d+.*\d+.*\d+/.test(txt);
+                    });
+                }
+            }
+
             const firstRow = rows[0];
-            const cells = firstRow ? Array.from(firstRow.querySelectorAll('div')) : [];
+            const cells = firstRow ? Array.from(firstRow.querySelectorAll('div, td, span')).filter(c => c.innerText.trim() !== "") : [];
             const cellTexts = cells.map(c => c.innerText.trim());
 
             // In Tavan (Bid Side), usually: [Price] [Lot] [Count]
