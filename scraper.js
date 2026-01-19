@@ -64,15 +64,18 @@ async function fetchMarketData(url, symbol) {
         });
 
         if (sessionRecovered === "clicked") {
-            console.log(`[GHOST] Reconnect button clicked! Waiting for app shell...`);
-            await new Promise(r => setTimeout(r, 6000));
+            console.log(`[GHOST] Reconnect button clicked! Reloading page...`);
+            await new Promise(r => setTimeout(r, 3000));
+            await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+            console.log(`[GHOST] Page reloaded. Waiting for app shell...`);
+            await new Promise(r => setTimeout(r, 5000));
         } else if (sessionRecovered === "not_found") {
             console.log(`[GHOST] Session issue detected but reconnect button NOT found.`);
         }
 
         // Step 3: Wait for App Shell Stabilization
         try {
-            await page.waitForSelector('#addSymbolInput, #searchInput, input[placeholder*="Ara"]', { timeout: 15000 });
+            await page.waitForSelector('#addSymbolInput, #searchInput, input[placeholder*="Ara"]', { timeout: 20000 });
         } catch (e) {
             console.warn(`[GHOST WARNING] Search input still not found. Dumping diagnostic...`);
             const dump = await page.evaluate(() => document.body.innerText.slice(0, 500));
