@@ -162,7 +162,8 @@ async function sendStatusReport(isTest = false, targetChatId = null) {
         try { await bot.api.sendMessage(targetChatId, msg); } catch (e) { }
     }
 
-    if (config.CHANNEL_ID && String(config.CHANNEL_ID) !== String(targetChatId)) {
+    // Send to channel ONLY IF skipChannel is false
+    if (!skipChannel && config.CHANNEL_ID && String(config.CHANNEL_ID) !== String(targetChatId)) {
         try { await bot.api.sendMessage(config.CHANNEL_ID, msg); } catch (e) { }
     }
 }
@@ -192,7 +193,7 @@ bot.command("test", async (ctx) => {
         return ctx.reply("Takip listeniz boş.");
     }
 
-    await sendStatusReport(true, ctx.chat.id);
+    await sendStatusReport(true, ctx.chat.id, true); // true as 3rd param skips the channel
 });
 
 // Main Loop
