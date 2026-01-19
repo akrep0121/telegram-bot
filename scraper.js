@@ -158,18 +158,33 @@ async function fetchMarketData(url, symbol) {
             }
 
             // If not found, log some info for debugging
-            const preview = Array.from(resultsBox.children).slice(0, 3).map(c => ({
+            const allText = resultsBox.innerText;
+            const children = Array.from(resultsBox.children).map(c => ({
                 tag: c.tagName,
-                text: c.innerText.substring(0, 30),
-                classes: Array.from(c.classList).join(' ')
+                text: c.innerText.substring(0, 50)
             }));
 
-            return { success: false, reason: "Symbol not found in children", preview };
+            // Pattern 2: Global Page Search (Last Resort)
+            const globalElements = Array.from(document.querySelectorAll('div, span, p, b'));
+            const globalMatch = globalElements.find(el => {
+                const text = el.innerText?.trim().toUpperCase() || "";
+                return text === sym || text.startsWith(sym + " ") || text.startsWith(sym + "\n");
+            });
+
+            if (globalMatch) {
+                globalMatch.click();
+                return { success: true, note: "Found via global search" };
+            }
+
+            return { success: false, reason: "Symbol not found anywhere", allText, children };
         }, symbol);
 
         if (!found.success) {
             console.log(`[SCRAPER] ${symbol} find failed: ${found.reason}`);
-            if (found.preview) console.log("Search Results Preview:", JSON.stringify(found.preview));
+            if (found.allText) console.log("Search Results Text:", found.allText.substring(0, 200));
+
+            const bodyPreview = await page.evaluate(() => document.body.innerText.substring(0, 500));
+            console.log("Global Page Preview:", bodyPreview);
 
             const searchHtml = await page.content();
             fs.writeFileSync('search_fail_debug.html', searchHtml);

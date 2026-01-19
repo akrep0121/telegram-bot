@@ -340,6 +340,11 @@ async function checkMarket() {
 // Scheduler: Run every 20 seconds
 setInterval(checkMarket, 20_000);
 
+// Heartbeat Log (Every 5 minutes)
+setInterval(() => {
+    console.log(`[HEARTBEAT] Bot is alive. Time: ${getTrTime().toISOString()}, Stocks: ${watchedStocks.length}`);
+}, 5 * 60 * 1000);
+
 // Error handler for bot
 bot.catch((err) => {
     console.error("❌ Bot error:", err);
@@ -388,25 +393,29 @@ bot.catch((err) => {
 
     // 409 Conflict & Startup Logic
     const startBotWithRetry = async (retryCount = 0) => {
-        const delays = [10000, 20000, 30000, 60000]; // 10s, 20s, 30s, 60s
+        const delays = [20000, 30000, 40000, 60000]; // Increased to 20s, 30s, 40s, 60s
         const delay = delays[retryCount] || 60000;
 
-        console.log(`⏳ Waiting ${delay / 1000} seconds before starting bot (Instance conflict prevention)...`);
+        console.log(`⏳ Waiting ${delay / 1000} seconds before starting bot (Instance conflict prevention - Attempt ${retryCount + 1})...`);
         await new Promise(r => setTimeout(r, delay));
 
         try {
+            // bot.start() is non-blocking in Grammy, but we wrap it carefully
             await bot.start({
                 onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
                 drop_pending_updates: true
             });
         } catch (err) {
             if (err.description?.includes("Conflict") || err.code === 409) {
-                console.warn(`⚠️ Bot conflict detected! (Attempt ${retryCount + 1}/5). Retrying...`);
+                console.warn(`⚠️ Bot conflict detected! (Attempt ${retryCount + 1}/5). Retrying in next cycle...`);
                 if (retryCount < 5) {
                     return startBotWithRetry(retryCount + 1);
                 }
+            } else {
+                console.error("❌ Bot encountered an error during start:", err.message);
+                // Don't crash the whole process, try to wait and restart
+                setTimeout(() => startBotWithRetry(0), 10000);
             }
-            console.error("❌ Fatal Bot Error:", err);
         }
     };
 
