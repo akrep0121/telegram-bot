@@ -113,13 +113,34 @@ async function fetchMarketData(url, symbol) {
 
         // HANDLE MODALS AND RECONNECT
         if (pageState.expired) {
-            console.log(`[SCRAPER] ${symbol} - Clicking Reconnect...`);
+            console.log(`[SCRAPER] ${symbol} - Session expired detected. Attempting recovery...`);
+
+            // Try clicking Reconnect
             await page.evaluate(() => {
                 const btns = Array.from(document.querySelectorAll('button, a, div, span'));
                 const reconnect = btns.find(b => (b.innerText || "").toLowerCase().includes('yeniden bağlan'));
-                if (reconnect) reconnect.click();
+                if (reconnect) {
+                    reconnect.click();
+                    reconnect.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                }
             });
-            await new Promise(r => setTimeout(r, 4000));
+
+            // Wait for reaction
+            await new Promise(r => setTimeout(r, 5000));
+
+            // Check if still expired
+            const stillExpired = await page.evaluate(() => document.body.innerText.includes('Oturum Sona Erdi'));
+
+            if (stillExpired) {
+                console.log(`[SCRAPER] ${symbol} - Reconnect click didn't work. Forcing page reload...`);
+                await page.reload({ waitUntil: 'networkidle2' });
+                await new Promise(r => setTimeout(r, 4000));
+
+                // Inject mock again after reload
+                await page.evaluate(TELEGRAM_MOCK);
+            } else {
+                console.log(`[SCRAPER] ${symbol} - Reconnect successful!`);
+            }
         }
 
         // Dismiss warning modal (Always try this)
