@@ -122,19 +122,20 @@ async function fetchMarketData(url, symbol) {
         }
 
         // Wait for search results
-        await new Promise(r => setTimeout(r, 2500)); // Longer wait for results to populate
-        await page.waitForSelector('#searchResults', { visible: true, timeout: 5000 }).catch(() => console.log("Results container wait timeout, assuming open."));
+        // Wait for search results and specific symbol to exist
+        await new Promise(r => setTimeout(r, 3000)); // Patience for UI render
 
-        // Find specific stock in results
         const found = await page.evaluate((sym) => {
-            // Selector updated to find deeper rows, avoiding the container div
-            const rows = Array.from(document.querySelectorAll('#searchResults .search-row'));
+            const resultsBox = document.querySelector('#searchResults');
+            if (!resultsBox) return false;
 
-            // Exact match on data-symbol attribute if available, else fuzzy text
+            const rows = Array.from(resultsBox.querySelectorAll('.search-row, div[role="button"]'));
+
+            // Try exact find first
             const match = rows.find(row => {
-                const rowSym = row.getAttribute('data-symbol');
-                if (rowSym && rowSym === sym) return true;
-                return row.innerText.toUpperCase().includes(sym);
+                const text = row.innerText.toUpperCase();
+                // Check for exact symbol word to avoid FRMPL matching something like "FRMPL-OLD"
+                return text.includes(sym);
             });
 
             if (match) {

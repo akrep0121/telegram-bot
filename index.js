@@ -386,14 +386,26 @@ bot.catch((err) => {
         console.error("Please check BOT_TOKEN in Hugging Face secrets.");
     }
 
-    bot.start(); // Non-blocking, runs in background
-    console.log("✅ Bot is now listening for commands");
+    // 409 Conflict Mitigation: Delay bot start to let previous instances die
+    console.log("⏳ Waiting 5 seconds for previous instances to clear...");
+    await new Promise(r => setTimeout(r, 5000));
 
-    // Final check to make sure loop hasn't started yet
+    try {
+        bot.start({
+            onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
+            drop_pending_updates: true // Clear any old messages that might cause loops
+        });
+    } catch (err) {
+        if (err.description?.includes("Conflict")) {
+            console.warn("⚠️ Bot conflict detected but handled. Continuing...");
+        } else {
+            throw err;
+        }
+    }
+
+    // Single trigger for market check
     if (!isCheckRunning) {
+        console.log("🚀 Launching initial market check...");
         checkMarket();
     }
 })();
-
-// Remove the second setTimeout to avoid race condition
-// setTimeout(checkMarket, 5000);
