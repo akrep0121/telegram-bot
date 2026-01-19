@@ -15,12 +15,11 @@ const USER_AGENTS = [
  * Launches a Headless Browser, navigates to the Web App URL,
  * and extracts the "Ceiling Lot" (Tavandaki Lot) data.
  * @param {string} url - The dynamic Web App URL with valid session.
- * @returns {Promise<number|null>} - The ceiling lot count or null if failed.
+ * @returns {Promise<object|null>} - Market data object or null if failed.
  */
 async function fetchMarketData(url, symbol) {
     let browser = null;
     try {
-        // Random user agent
         const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
         browser = await puppeteer.launch({
@@ -37,7 +36,6 @@ async function fetchMarketData(url, symbol) {
 
         const page = await browser.newPage();
 
-        // Random viewport to avoid fingerprinting
         const viewports = [
             { width: 375, height: 812 },
             { width: 414, height: 896 },
@@ -46,44 +44,31 @@ async function fetchMarketData(url, symbol) {
         const viewport = viewports[Math.floor(Math.random() * viewports.length)];
         await page.setViewport(viewport);
 
-        // Set extra headers to look more human
         await page.setExtraHTTPHeaders({
             'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         });
 
-        // Random delay before navigation (1-3 seconds) to appear more human
-        await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
 
-        // console.log(`Navigating to Web App...`); // Quiet logs
         let retries = 3;
         let loaded = false;
-
         while (retries > 0 && !loaded) {
             try {
                 await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
                 loaded = true;
             } catch (e) {
                 retries--;
-                if (retries > 0) {
-                    console.log(`Navigation failed, retrying... (${3 - retries}/3)`);
-                    await new Promise(r => setTimeout(r, 2000));
-                } else {
-                    throw e;
-                }
+                if (retries > 0) await new Promise(r => setTimeout(r, 2000));
+                else throw e;
             }
         }
 
-        // Check redirection
         const title = await page.title();
         if (title.includes("Telegram") || (await page.$('.tgme_page'))) {
-            console.log("Session invalid.");
-            return null; // Signals to get new URL
+            return null;
         }
 
-        // console.log(`Searching for ${symbol}...`);
-
-        // NAVIGATION
         const searchInputSelector = '#addSymbolInput';
         const fallbackSearchSelector = '#searchInput';
 
@@ -94,58 +79,43 @@ async function fetchMarketData(url, symbol) {
             try {
                 const targetSelector = await page.waitForSelector(`${searchInputSelector}, ${fallbackSearchSelector}`, { timeout: 10000 });
 
-                // Focus and clear input
-                await page.click(searchInputSelector).catch(() => page.click(fallbackSearchSelector));
-                await page.keyboard.down('Control');
-                await page.keyboard.press('A');
-                await page.keyboard.up('Control');
-                await page.keyboard.press('Backspace');
+                await page.evaluate((sel, sym) => {
+                    const input = document.querySelector(sel);
+                    if (input) {
+                        input.value = '';
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                }, searchInputSelector, symbol);
 
-                // Type with delay
-                await page.type(searchInputSelector, symbol, { delay: 100 }).catch(() => page.type(fallbackSearchSelector, symbol, { delay: 100 }));
+                await page.click(searchInputSelector).catch(() => page.click(fallbackSearchSelector));
+                await page.keyboard.type(symbol, { delay: 100 });
                 await page.keyboard.press('Enter');
                 searchSuccess = true;
             } catch (e) {
                 searchAttempt++;
-                console.log(`Search attempt ${searchAttempt} failed for ${symbol}. Retrying...`);
                 await new Promise(r => setTimeout(r, 2000));
             }
         }
 
-        if (!searchSuccess) {
-            console.log("CRITICAL: No search input found! Dumping page content...");
-            const html = await page.content();
-            const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500).replace(/\n/g, ' '));
-            console.log("PAGE PREVIEW:", bodyText);
-            fs.writeFileSync('error_no_input.html', html);
-            throw new Error("No search input found on page.");
-        }
+        if (!searchSuccess) throw new Error("Search input failed.");
 
-        // Wait for search results and specific symbol to exist
-        await new Promise(r => setTimeout(r, 3000)); // Patience for UI render
+        await new Promise(r => setTimeout(r, 3000));
 
         const found = await page.evaluate((sym) => {
             const resultsBox = document.querySelector('#searchResults');
             if (!resultsBox) return { success: false, reason: "No results box" };
 
             const allElements = Array.from(resultsBox.querySelectorAll('*'));
-            const logs = [];
-
-            // Pattern 1: Find by text content accurately
             const match = allElements.find(el => {
                 const text = el.innerText?.trim().toUpperCase() || "";
-                // Use regex to find exact symbol word or matching start
                 const regex = new RegExp(`(^|\\s)${sym}($|\\s|\\.)`, 'i');
                 return regex.test(text);
             });
 
             if (match) {
-                // Determine the best element to click (the element itself or its nearest clickable parent)
                 let target = match;
                 while (target && target !== resultsBox) {
                     if (target.tagName === 'DIV' || target.tagName === 'BUTTON' || target.classList.contains('search-row')) {
-                        target.click(); // Standard click
-                        // Also try to dispatch event for assurance
                         target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
                         target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                         target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -153,18 +123,10 @@ async function fetchMarketData(url, symbol) {
                     }
                     target = target.parentElement;
                 }
-                match.click(); // Final fallback
+                match.click();
                 return { success: true };
             }
 
-            // If not found, log some info for debugging
-            const allText = resultsBox.innerText;
-            const children = Array.from(resultsBox.children).map(c => ({
-                tag: c.tagName,
-                text: c.innerText.substring(0, 50)
-            }));
-
-            // Pattern 2: Global Page Search (Last Resort)
             const globalElements = Array.from(document.querySelectorAll('div, span, p, b'));
             const globalMatch = globalElements.find(el => {
                 const text = el.innerText?.trim().toUpperCase() || "";
@@ -173,52 +135,27 @@ async function fetchMarketData(url, symbol) {
 
             if (globalMatch) {
                 globalMatch.click();
-                return { success: true, note: "Found via global search" };
+                return { success: true };
             }
 
-            return { success: false, reason: "Symbol not found anywhere", allText, children };
+            return { success: false, reason: "Symbol not found" };
         }, symbol);
 
         if (!found.success) {
-            console.log(`[SCRAPER] ${symbol} find failed: ${found.reason}`);
-            if (found.allText) console.log("Search Results Text:", found.allText.substring(0, 200));
-
-            const bodyPreview = await page.evaluate(() => document.body.innerText.substring(0, 500));
-            console.log("Global Page Preview:", bodyPreview);
-
-            const searchHtml = await page.content();
-            fs.writeFileSync('search_fail_debug.html', searchHtml);
-            await page.screenshot({ path: 'search_fail_debug.png' });
-
-            // Fallback: Click the first item if it exists
             const firstItem = await page.$('#searchResults > div');
-            if (firstItem) {
-                console.log("Clicking first result as fallback...");
-                await firstItem.click();
-            } else {
-                throw new Error("No search results found.");
-            }
-        } else {
-            console.log(`[SCRAPER] Interaction for ${symbol} initiated successfully.`);
+            if (firstItem) await firstItem.click();
+            else throw new Error("No search results found.");
         }
 
-        // Wait for Detail View (Check for multiple possible signs of detail view)
-        try {
-            await page.waitForFunction(
-                () => {
-                    const detail = document.querySelector('#detailView');
-                    const depthTab = document.querySelector('button[data-tab="derinlik"]');
-                    return (detail && detail.classList.contains('active')) || depthTab;
-                },
-                { timeout: 12000 }
-            );
-        } catch (e) {
-            console.log("Detail view did not appear after click. Last HTML preview:");
-            const preview = await page.evaluate(() => document.body.innerText.substring(0, 300));
-            console.log("PREVIEW:", preview);
-            await page.screenshot({ path: 'detail_fail_debug.png' });
-            throw new Error(`Detail view for ${symbol} failed to activate.`);
-        }
+        // Wait for Detail View
+        await page.waitForFunction(
+            () => {
+                const detail = document.querySelector('#detailView');
+                const depthTab = document.querySelector('button[data-tab="derinlik"]');
+                return (detail && detail.classList.contains('active')) || depthTab;
+            },
+            { timeout: 12000 }
+        ).catch(() => { });
 
         // Click "Derinlik" tab
         const depthTabSelector = 'button[data-tab="derinlik"]';
@@ -226,31 +163,26 @@ async function fetchMarketData(url, symbol) {
             await page.waitForSelector(depthTabSelector, { timeout: 5000 });
             await page.click(depthTabSelector);
         } catch (e) {
-            console.log("Depth tab not found. Trying to find by text...");
-            const clicked = await page.evaluate(() => {
+            await page.evaluate(() => {
                 const buttons = Array.from(document.querySelectorAll('button, div, span'));
                 const depthBtn = buttons.find(b => b.innerText.toLowerCase().includes('derinlik'));
-                if (depthBtn) {
-                    depthBtn.click();
-                    return true;
-                }
-                return false;
+                if (depthBtn) depthBtn.click();
             });
-            if (!clicked) throw new Error("Could not find Derinlik tab.");
         }
 
-        // Wait for depth data - INCREASED WAIT FOR SLOW SERVERS
-        await new Promise(r => setTimeout(r, 3000));
+        // Wait for depth data - ULTRA PRECISION
+        await new Promise(r => setTimeout(r, 4000));
         try {
             await page.waitForFunction(
                 () => {
                     const content = document.querySelector('#depthContent');
-                    // Ensure it doesn't have Skeleton or "--"
-                    return content && !content.innerHTML.includes('skeleton') && !content.innerText.includes('--');
+                    if (!content) return false;
+                    // Wait for at least ONE digit in the results area (implies data loaded)
+                    return /\d/.test(content.innerText) && !content.innerHTML.includes('skeleton');
                 },
-                { timeout: 10000 }
+                { timeout: 15000 }
             );
-        } catch (e) { console.log("Depth data loading timeout - proceeding with partial data."); }
+        } catch (e) { console.log("Depth data loading timeout - proceeding with current view."); }
 
         // EXTRACT DATA
         const data = await page.evaluate(() => {
@@ -258,16 +190,12 @@ async function fetchMarketData(url, symbol) {
             const parseNum = (str, isLot = false) => {
                 if (!str) return 0;
                 let clean = str.trim();
-                if (isLot) {
-                    // For Lot counts: remove everything that is not a digit
-                    return parseInt(clean.replace(/\D/g, ''), 10) || 0;
-                }
-                // For Prices: 16.171,50 or 16,171.50
-                let lastSeparatorIndex = Math.max(clean.lastIndexOf(','), clean.lastIndexOf('.'));
-                if (lastSeparatorIndex !== -1 && (clean.length - lastSeparatorIndex <= 3)) {
-                    let decimal = clean.substring(lastSeparatorIndex + 1);
-                    let integer = clean.substring(0, lastSeparatorIndex).replace(/[,.]/g, '');
-                    return parseFloat(integer + "." + decimal) || 0;
+                if (isLot) return parseInt(clean.replace(/\D/g, ''), 10) || 0;
+                let lastSep = Math.max(clean.lastIndexOf(','), clean.lastIndexOf('.'));
+                if (lastSep !== -1 && (clean.length - lastSep <= 3)) {
+                    let dec = clean.substring(lastSep + 1);
+                    let int = clean.substring(0, lastSep).replace(/[,.]/g, '');
+                    return parseFloat(int + "." + dec) || 0;
                 }
                 return parseFloat(clean.replace(/[,.]/g, '')) || 0;
             };
@@ -275,41 +203,36 @@ async function fetchMarketData(url, symbol) {
             let priceStr = getTxt('lastPrice');
             let ceilingStr = getTxt('infoCeiling');
 
-            // --- SMART FALLBACK FOR PRICE/CEILING ---
             if (!priceStr || priceStr === "--" || priceStr === "") {
-                const allDivs = Array.from(document.querySelectorAll('div, span, b, p'));
-                const priceLabel = allDivs.find(d => {
-                    const t = d.innerText;
-                    return t && (t.includes('Son Fiyat') || t.includes('Fiyat:'));
-                });
-                if (priceLabel && priceLabel.nextElementSibling) priceStr = priceLabel.nextElementSibling.innerText;
+                const tags = Array.from(document.querySelectorAll('div, span, b, p'));
+                const pLabel = tags.find(t => t.innerText && t.innerText.includes('Son Fiyat'));
+                if (pLabel && pLabel.nextElementSibling) priceStr = pLabel.nextElementSibling.innerText;
+            }
+            if (!ceilingStr || ceilingStr === "--" || ceilingStr === "") {
+                const tags = Array.from(document.querySelectorAll('div, span, b, p'));
+                const cLabel = tags.find(t => t.innerText && t.innerText.includes('Tavan'));
+                if (cLabel && cLabel.nextElementSibling) ceilingStr = cLabel.nextElementSibling.innerText;
             }
 
-            // Refined Depth Row Selection
-            let rows = Array.from(document.querySelectorAll('#depthContent .depth-row:not(.skeleton-row)'));
-
-            // --- SMART FALLBACK FOR ROWS ---
-            if (rows.length === 0) {
-                // Find ANY element that contains "Alış" and "Lot"
-                const depthArea = Array.from(document.querySelectorAll('div, table, section')).find(el => {
-                    const t = el.innerText;
-                    return t && t.includes('Alış') && t.includes('Lot');
+            let rows = Array.from(document.querySelectorAll('#depthContent .depth-row, .depth-table tr, div[role="row"]'))
+                .filter(r => {
+                    const txt = r.innerText || "";
+                    if (/Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa/i.test(txt)) return false;
+                    const digits = (txt.match(/\d/g) || []).length;
+                    return digits >= 2;
                 });
-                if (depthArea) {
-                    rows = Array.from(depthArea.querySelectorAll('div, tr, .row')).filter(r => {
-                        const txt = r.innerText;
-                        // Looks like a row with 3 segments: [Price] [Lot] [Count]
-                        return txt && /\d+.*\d+.*\d+/.test(txt);
-                    });
-                }
-            }
 
             const firstRow = rows[0];
             const cells = firstRow ? Array.from(firstRow.querySelectorAll('div, td, span')).filter(c => c.innerText.trim() !== "") : [];
             const cellTexts = cells.map(c => c.innerText.trim());
 
-            // In Tavan (Bid Side), usually: [Price] [Lot] [Count]
-            const rawLotStr = cellTexts[1] || "0";
+            let topBidLot = 0;
+            let rawLotStr = "0";
+            if (cellTexts.length >= 2) {
+                const nums = cellTexts.map(t => parseNum(t, true));
+                topBidLot = Math.max(...nums);
+                rawLotStr = cellTexts[nums.indexOf(topBidLot)];
+            }
 
             return {
                 symbol: getTxt('symbolDisplay'),
@@ -319,23 +242,19 @@ async function fetchMarketData(url, symbol) {
                 allCells: cellTexts,
                 price: parseNum(priceStr),
                 ceiling: parseNum(ceilingStr),
-                topBidLot: parseNum(rawLotStr, true), // Passing true for Lot parsing
-                isCeiling: (priceStr !== "" && priceStr === ceilingStr)
+                topBidLot: topBidLot,
+                isCeiling: (priceStr !== "" && parseNum(priceStr) === parseNum(ceilingStr))
             };
         });
 
         if (data) {
             console.log(`[DEBUG] ${symbol} -> Cells: [${data.allCells.join(' | ')}], Calculated Lot: ${data.topBidLot}`);
-            // Safety check: if read lot is suspiciously small (like the price), log a warning
-            if (data.topBidLot < 1000) {
-                console.log(`[WARN] ${symbol} lot count (${data.topBidLot}) seems too low. Check if columns shifted.`);
-            }
         }
 
         return data;
 
     } catch (error) {
-        console.error(`Puppeteer Error (${symbol}):`, error.message);
+        console.error(`Scrape Error (${symbol}):`, error.message);
         return null;
     } finally {
         if (browser) await browser.close();
