@@ -386,24 +386,32 @@ bot.catch((err) => {
         console.error("Please check BOT_TOKEN in Hugging Face secrets.");
     }
 
-    // 409 Conflict Mitigation: Delay bot start to let previous instances die
-    console.log("⏳ Waiting 5 seconds for previous instances to clear...");
-    await new Promise(r => setTimeout(r, 5000));
+    // 409 Conflict & Startup Logic
+    const startBotWithRetry = async (retryCount = 0) => {
+        const delays = [10000, 20000, 30000, 60000]; // 10s, 20s, 30s, 60s
+        const delay = delays[retryCount] || 60000;
 
-    try {
-        bot.start({
-            onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
-            drop_pending_updates: true // Clear any old messages that might cause loops
-        });
-    } catch (err) {
-        if (err.description?.includes("Conflict")) {
-            console.warn("⚠️ Bot conflict detected but handled. Continuing...");
-        } else {
-            throw err;
+        console.log(`⏳ Waiting ${delay / 1000} seconds before starting bot (Instance conflict prevention)...`);
+        await new Promise(r => setTimeout(r, delay));
+
+        try {
+            await bot.start({
+                onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
+                drop_pending_updates: true
+            });
+        } catch (err) {
+            if (err.description?.includes("Conflict") || err.code === 409) {
+                console.warn(`⚠️ Bot conflict detected! (Attempt ${retryCount + 1}/5). Retrying...`);
+                if (retryCount < 5) {
+                    return startBotWithRetry(retryCount + 1);
+                }
+            }
+            console.error("❌ Fatal Bot Error:", err);
         }
-    }
+    };
 
-    // Single trigger for market check
+    await startBotWithRetry();
+
     if (!isCheckRunning) {
         console.log("🚀 Launching initial market check...");
         checkMarket();

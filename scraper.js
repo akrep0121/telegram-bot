@@ -121,32 +121,56 @@ async function fetchMarketData(url, symbol) {
             throw new Error("No search input found on page.");
         }
 
-        // Wait for search results
         // Wait for search results and specific symbol to exist
         await new Promise(r => setTimeout(r, 3000)); // Patience for UI render
 
         const found = await page.evaluate((sym) => {
             const resultsBox = document.querySelector('#searchResults');
-            if (!resultsBox) return false;
+            if (!resultsBox) return { success: false, reason: "No results box" };
 
-            const rows = Array.from(resultsBox.querySelectorAll('.search-row, div[role="button"]'));
+            const allElements = Array.from(resultsBox.querySelectorAll('*'));
+            const logs = [];
 
-            // Try exact find first
-            const match = rows.find(row => {
-                const text = row.innerText.toUpperCase();
-                // Check for exact symbol word to avoid FRMPL matching something like "FRMPL-OLD"
-                return text.includes(sym);
+            // Pattern 1: Find by text content accurately
+            const match = allElements.find(el => {
+                const text = el.innerText?.trim().toUpperCase() || "";
+                // Use regex to find exact symbol word or matching start
+                const regex = new RegExp(`(^|\\s)${sym}($|\\s|\\.)`, 'i');
+                return regex.test(text);
             });
 
             if (match) {
-                match.click();
-                return true;
+                // Determine the best element to click (the element itself or its nearest clickable parent)
+                let target = match;
+                while (target && target !== resultsBox) {
+                    if (target.tagName === 'DIV' || target.tagName === 'BUTTON' || target.classList.contains('search-row')) {
+                        target.click(); // Standard click
+                        // Also try to dispatch event for assurance
+                        target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        return { success: true };
+                    }
+                    target = target.parentElement;
+                }
+                match.click(); // Final fallback
+                return { success: true };
             }
-            return false;
+
+            // If not found, log some info for debugging
+            const preview = Array.from(resultsBox.children).slice(0, 3).map(c => ({
+                tag: c.tagName,
+                text: c.innerText.substring(0, 30),
+                classes: Array.from(c.classList).join(' ')
+            }));
+
+            return { success: false, reason: "Symbol not found in children", preview };
         }, symbol);
 
-        if (!found) {
-            console.log(`Symbol ${symbol} not found in results. Dumping search HTML...`);
+        if (!found.success) {
+            console.log(`[SCRAPER] ${symbol} find failed: ${found.reason}`);
+            if (found.preview) console.log("Search Results Preview:", JSON.stringify(found.preview));
+
             const searchHtml = await page.content();
             fs.writeFileSync('search_fail_debug.html', searchHtml);
             await page.screenshot({ path: 'search_fail_debug.png' });
@@ -160,7 +184,7 @@ async function fetchMarketData(url, symbol) {
                 throw new Error("No search results found.");
             }
         } else {
-            console.log(`Clicked result for ${symbol}.`);
+            console.log(`[SCRAPER] Interaction for ${symbol} initiated successfully.`);
         }
 
         // Wait for Detail View (Check for multiple possible signs of detail view)
