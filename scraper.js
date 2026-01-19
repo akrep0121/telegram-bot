@@ -36,20 +36,38 @@ async function fetchMarketData(url, symbol) {
             };
 
             const bodyText = document.body.innerText;
-            if (bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Yeniden Bağlan')) {
-                const btns = Array.from(document.querySelectorAll('button, div, span, a'));
-                const reconnectBtn = btns.find(b => b.innerText.toLowerCase().includes('yeniden bağlan'));
+            if (bodyText.includes('Oturum Sona Erdi') || bodyText.includes('Yeniden Bağlan') || bodyText.includes('Bağlantınız kesildi')) {
+                // Find reconnect button by various methods
+                const allElements = Array.from(document.querySelectorAll('button, div, span, a'));
+
+                // Method 1: Find by text content
+                let reconnectBtn = allElements.find(b => {
+                    const txt = (b.innerText || "").toLowerCase();
+                    return txt.includes('yeniden bağlan') || txt.includes('yeniden baglan');
+                });
+
+                // Method 2: Find button-like elements near "Oturum Sona Erdi"
+                if (!reconnectBtn) {
+                    reconnectBtn = allElements.find(b => {
+                        const txt = (b.innerText || "").toLowerCase();
+                        return txt === 'bağlan' || txt === 'baglan' || txt === 'reconnect';
+                    });
+                }
+
                 if (reconnectBtn) {
                     multiClick(reconnectBtn);
-                    return true;
+                    return "clicked";
                 }
+                return "not_found";
             }
-            return false;
+            return "no_session_issue";
         });
 
-        if (sessionRecovered) {
-            console.log(`[GHOST] Reconnect signal sent. Waiting for app shell...`);
-            await new Promise(r => setTimeout(r, 5000));
+        if (sessionRecovered === "clicked") {
+            console.log(`[GHOST] Reconnect button clicked! Waiting for app shell...`);
+            await new Promise(r => setTimeout(r, 6000));
+        } else if (sessionRecovered === "not_found") {
+            console.log(`[GHOST] Session issue detected but reconnect button NOT found.`);
         }
 
         // Step 3: Wait for App Shell Stabilization
