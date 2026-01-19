@@ -4,25 +4,73 @@ puppeteer.use(StealthPlugin());
 
 const fs = require('fs');
 
-// Random User Agents to rotate
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-];
+// Telegram WebApp API Mock - Essential for bypassing environment checks
+const TELEGRAM_MOCK = `
+    window.Telegram = {
+        WebApp: {
+            initData: "",
+            initDataUnsafe: {},
+            version: "6.0",
+            platform: "android",
+            colorScheme: "light",
+            themeParams: {},
+            isExpanded: true,
+            viewportHeight: 800,
+            viewportStableHeight: 800,
+            headerColor: "#ffffff",
+            backgroundColor: "#ffffff",
+            isClosingConfirmationEnabled: false,
+            ready: function() { console.log("Telegram.WebApp.ready()"); },
+            expand: function() {},
+            close: function() {},
+            enableClosingConfirmation: function() {},
+            disableClosingConfirmation: function() {},
+            onEvent: function() {},
+            offEvent: function() {},
+            sendData: function() {},
+            openLink: function() {},
+            openTelegramLink: function() {},
+            showPopup: function() {},
+            showAlert: function() {},
+            showConfirm: function() {},
+            MainButton: {
+                text: "", 
+                color: "#2481cc", 
+                textColor: "#ffffff", 
+                isVisible: false, 
+                isActive: true,
+                show: function() { this.isVisible = true; },
+                hide: function() { this.isVisible = false; },
+                enable: function() { this.isActive = true; },
+                disable: function() { this.isActive = false; },
+                setText: function(t) { this.text = t; },
+                onClick: function() {},
+                offClick: function() {},
+                showProgress: function() {},
+                hideProgress: function() {}
+            },
+            BackButton: {
+                isVisible: false,
+                onClick: function() {},
+                offClick: function() {},
+                show: function() { this.isVisible = true; },
+                hide: function() { this.isVisible = false; }
+            },
+            HapticFeedback: {
+                impactOccurred: function() {},
+                notificationOccurred: function() {},
+                selectionChanged: function() {}
+            }
+        }
+    };
+`;
 
 /**
- * Launches a Headless Browser, navigates to the Web App URL,
- * and extracts the "Ceiling Lot" (Tavandaki Lot) data.
- * @param {string} url - The dynamic Web App URL with valid session.
- * @returns {Promise<number|null>} - The ceiling lot count or null if failed.
+ * Launches a Headless Browser with Telegram Mock and Mobile UA.
  */
 async function fetchMarketData(url, symbol) {
     let browser = null;
     try {
-        // Random user agent
-        const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-
         browser = await puppeteer.launch({
             headless: "new",
             args: [
@@ -30,214 +78,208 @@ async function fetchMarketData(url, symbol) {
                 '--disable-setuid-sandbox',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                `--user-agent=${userAgent}`
+                '--disable-features=IsolateOrigins,site-per-process'
             ]
         });
 
         const page = await browser.newPage();
 
-        // Random viewport to avoid fingerprinting
-        const viewports = [
-            { width: 375, height: 812 },
-            { width: 414, height: 896 },
-            { width: 390, height: 844 }
-        ];
-        const viewport = viewports[Math.floor(Math.random() * viewports.length)];
-        await page.setViewport(viewport);
+        // Mobile Viewport
+        await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
 
-        // Set extra headers to look more human
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        // Mobile User Agent (Android)
+        await page.setUserAgent('Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36');
+
+        // Inject Telegram Mock BEFORE navigation
+        await page.evaluateOnNewDocument(TELEGRAM_MOCK);
+
+        console.log(`[SCRAPER] ${symbol} - Navigating...`);
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        // Wait for page load
+        await new Promise(r => setTimeout(r, 4000));
+
+        // DEBUG: Check page state
+        const pageState = await page.evaluate(() => {
+            const body = document.body.innerText;
+            return {
+                expired: body.includes('Oturum Sona Erdi') || body.includes('Bağlantınız kesildi'),
+                warning: body.includes('10 dakika'),
+                telegramPresent: !!window.Telegram.WebApp,
+                preview: body.slice(0, 200).replace(/\n/g, ' ')
+            };
         });
+        console.log(`[DEBUG] ${symbol} State: Expired=${pageState.expired}, Warning=${pageState.warning}, Mock=${pageState.telegramPresent}`);
 
-        // Random delay before navigation (1-3 seconds) to appear more human
-        await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+        // HANDLE MODALS AND RECONNECT
+        if (pageState.expired) {
+            console.log(`[SCRAPER] ${symbol} - Clicking Reconnect...`);
+            await page.evaluate(() => {
+                const btns = Array.from(document.querySelectorAll('button, a, div, span'));
+                const reconnect = btns.find(b => (b.innerText || "").toLowerCase().includes('yeniden bağlan'));
+                if (reconnect) reconnect.click();
+            });
+            await new Promise(r => setTimeout(r, 4000));
+        }
 
-        // console.log(`Navigating to Web App...`); // Quiet logs
-        let retries = 3;
-        let loaded = false;
+        // Dismiss warning modal (Always try this)
+        console.log(`[SCRAPER] ${symbol} - Dismissing modals...`);
+        // 1. Try Enter
+        await page.keyboard.press('Enter');
+        await new Promise(r => setTimeout(r, 500));
 
-        while (retries > 0 && !loaded) {
-            try {
-                await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-                loaded = true;
-            } catch (e) {
-                retries--;
-                if (retries > 0) {
-                    console.log(`Navigation failed, retrying... (${3 - retries}/3)`);
-                    await new Promise(r => setTimeout(r, 2000));
-                } else {
-                    throw e;
+        // 2. Try clicking coordinates (Bottom center - often 'Tamam'/'Anladim')
+        await page.mouse.click(195, 750);
+        await new Promise(r => setTimeout(r, 500));
+        await page.mouse.click(195, 700);
+
+        // 3. Try clicking "Anladım" / "Tamam" buttons
+        await page.evaluate(() => {
+            const texts = ['anladım', 'tamam', 'devam', 'kapat', 'ok', 'close'];
+            const all = Array.from(document.querySelectorAll('button, div[role="button"], a, span'));
+            for (const el of all) {
+                const txt = (el.innerText || "").toLowerCase().trim();
+                if (texts.some(t => txt === t || txt.includes(t)) && !txt.includes('yeniden')) {
+                    el.click();
                 }
             }
-        }
-
-        // Check redirection
-        const title = await page.title();
-        if (title.includes("Telegram") || (await page.$('.tgme_page'))) {
-            console.log("Session invalid.");
-            return null; // Signals to get new URL
-        }
-
-        // DEBUG: Log page content right after navigation
-        const pagePreview = await page.evaluate(() => document.body.innerText.substring(0, 400).replace(/\n/g, ' '));
-        console.log(`[DEBUG] Page after nav: ${pagePreview}`);
-
-        // console.log(`Searching for ${symbol}...`);
-
-        // NAVIGATION
-        const searchInputSelector = '#addSymbolInput';
-        try {
-            await page.waitForSelector(searchInputSelector, { timeout: 10000 });
-            await page.type(searchInputSelector, symbol, { delay: 100 });
-            await page.keyboard.press('Enter');
-        } catch (e) {
-            // First fallback
-            try {
-                await page.waitForSelector('#searchInput', { timeout: 5000 });
-                await page.type('#searchInput', symbol, { delay: 100 });
-                await page.keyboard.press('Enter');
-            } catch (err2) {
-                console.log("CRITICAL: No search input found! Dumping page content...");
-                const html = await page.content();
-                // Print first 500 chars of body to log for immediate visibility in HF logs
-                const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500).replace(/\n/g, ' '));
-                console.log("PAGE PREVIEW:", bodyText);
-
-                // Also save to file (though user might not see it easily in HF, helpful if they download)
-                fs.writeFileSync('error_no_input.html', html);
-                throw new Error("No search input found on page.");
-            }
-        }
-
-        // Wait for search results
-        // Results might take a moment to refresh after Enter
-        await page.waitForSelector('#searchResults', { visible: true, timeout: 5000 }).catch(() => console.log("Results container wait timeout, assuming open."));
+        });
         await new Promise(r => setTimeout(r, 2000));
 
-        // Find specific stock in results
-        const found = await page.evaluate((sym) => {
-            // Selector updated to find deeper rows, avoiding the container div
-            const rows = Array.from(document.querySelectorAll('#searchResults .search-row'));
+        // SEARCH
+        console.log(`[SCRAPER] ${symbol} - Searching...`);
 
-            // Exact match on data-symbol attribute if available, else fuzzy text
-            const match = rows.find(row => {
-                const rowSym = row.getAttribute('data-symbol');
-                if (rowSym && rowSym === sym) return true;
-                return row.innerText.toUpperCase().includes(sym);
-            });
+        // Try multiple selectors for input
+        const inputSelectors = ['#addSymbolInput', '#searchInput', 'input[type="text"]', 'input[type="search"]'];
+        let inputFound = false;
 
-            if (match) {
-                match.click();
-                return true;
+        for (const sel of inputSelectors) {
+            if (await page.$(sel)) {
+                console.log(`[SCRAPER] Found input: ${sel}`);
+                await page.click(sel);
+                // Select all and delete
+                await page.evaluate((s) => { document.querySelector(s).value = ''; }, sel);
+                await page.type(sel, symbol, { delay: 100 });
+                inputFound = true;
+                break;
             }
-            return false;
+        }
+
+        if (!inputFound) {
+            console.log(`[SCRAPER] No input found! Dumping body...`);
+            const bodyDump = await page.evaluate(() => document.body.innerText.slice(0, 300));
+            console.log(`[DUMP] ${bodyDump}`);
+            return null;
+        }
+
+        await new Promise(r => setTimeout(r, 1000));
+        await page.keyboard.press('Enter');
+        await new Promise(r => setTimeout(r, 4000));
+
+        // CLICK RESULT
+        console.log(`[SCRAPER] ${symbol} - Clicking result...`);
+        // Use the robust finding logic from older working code but adapted
+        const clicked = await page.evaluate((sym) => {
+            // Try specific container first
+            const container = document.getElementById('searchResults');
+            if (container) {
+                const rows = Array.from(container.querySelectorAll('.search-row, div, li'));
+                const match = rows.find(r => r.innerText.toUpperCase().includes(sym));
+                if (match) { match.click(); return "clicked_container"; }
+            }
+
+            // Fallback to global search
+            const all = Array.from(document.querySelectorAll('div, span, li'));
+            const match = all.find(el => {
+                const t = el.innerText.toUpperCase();
+                return t === sym || t.startsWith(sym + " ") || t.startsWith(sym + "\n");
+            });
+            if (match) { match.click(); return "clicked_global"; }
+
+            return "not_found";
         }, symbol);
 
-        if (!found) {
-            console.log(`Symbol ${symbol} not found in results. Dumping search HTML...`);
-            const searchHtml = await page.content();
-            fs.writeFileSync('search_fail_debug.html', searchHtml);
-            await page.screenshot({ path: 'search_fail_debug.png' });
-
-            // Fallback: Click the first item if it exists
-            const firstItem = await page.$('#searchResults > div');
-            if (firstItem) {
-                console.log("Clicking first result as fallback...");
-                await firstItem.click();
-            } else {
-                throw new Error("No search results found.");
-            }
-        } else {
-            console.log(`Clicked result for ${symbol}.`);
+        if (clicked === "not_found") {
+            // Fallback: Click first generic result
+            console.log(`[SCRAPER] ${symbol} - Not found specific, clicking first valid result...`);
+            await page.evaluate(() => {
+                const first = document.querySelector('#searchResults > div, .search-row');
+                if (first) first.click();
+            });
         }
 
-        // Wait for Detail View
-        try {
-            await page.waitForSelector('#detailView.view.active', { timeout: 10000 });
-        } catch (e) {
-            console.log("Detail view did not appear. Dumping state...");
-            await page.screenshot({ path: 'detail_fail_debug.png' });
-            throw e;
+        await new Promise(r => setTimeout(r, 4000));
+
+        // CLICK DEPTH TAB
+        console.log(`[SCRAPER] ${symbol} - Opening Depth Loop...`);
+        // Retry clicking depth tab distinct times
+        for (let i = 0; i < 3; i++) {
+            const depthClicked = await page.evaluate(() => {
+                const tabs = Array.from(document.querySelectorAll('button, div, span, a'));
+                const depth = tabs.find(t => (t.innerText || "").toLowerCase().includes('derinlik'));
+                if (depth) {
+                    depth.click();
+                    return true;
+                }
+                return false;
+            });
+            if (depthClicked) break;
+            await new Promise(r => setTimeout(r, 1000));
         }
-
-        // Click "Derinlik" tab
-        const depthTabSelector = 'button[data-tab="derinlik"]';
-        await page.waitForSelector(depthTabSelector);
-        await page.click(depthTabSelector);
-
-        // Wait for depth data - INCREASED WAIT FOR SLOW SERVERS
         await new Promise(r => setTimeout(r, 3000));
-        try {
-            await page.waitForFunction(
-                () => {
-                    const content = document.querySelector('#depthContent');
-                    // Ensure it doesn't have Skeleton or "--"
-                    return content && !content.innerHTML.includes('skeleton') && !content.innerText.includes('--');
-                },
-                { timeout: 10000 }
-            );
-        } catch (e) { console.log("Depth data loading timeout - proceeding with partial data."); }
 
-        // EXTRACT DATA
+        // EXTRACT LOOP (Wait for data)
+        console.log(`[SCRAPER] ${symbol} - Extracting...`);
         const data = await page.evaluate(() => {
-            const getTxt = (id) => document.getElementById(id)?.innerText?.trim() || "";
-            const parseNum = (str, isLot = false) => {
-                if (!str) return 0;
-                let clean = str.trim();
-                if (isLot) {
-                    // For Lot counts: remove everything that is not a digit
-                    return parseInt(clean.replace(/\D/g, ''), 10) || 0;
-                }
-                // For Prices: 16.171,50 or 16,171.50
-                let lastSeparatorIndex = Math.max(clean.lastIndexOf(','), clean.lastIndexOf('.'));
-                if (lastSeparatorIndex !== -1 && (clean.length - lastSeparatorIndex <= 3)) {
-                    let decimal = clean.substring(lastSeparatorIndex + 1);
-                    let integer = clean.substring(0, lastSeparatorIndex).replace(/[,.]/g, '');
-                    return parseFloat(integer + "." + decimal) || 0;
-                }
-                return parseFloat(clean.replace(/[,.]/g, '')) || 0;
+            const getPrice = () => {
+                const el = document.getElementById('lastPrice') || document.querySelector('.price-main');
+                return el ? el.innerText.trim() : "0";
             };
+            const price = getPrice();
 
-            const priceStr = getTxt('lastPrice');
-            const ceilingStr = getTxt('infoCeiling');
+            // Try to find lot cells
+            const cells = Array.from(document.querySelectorAll('div, span, td'));
+            // Filter for numeric-looking cells that are likely lots (integer, high value)
 
-            // Refined Depth Row Selection
-            const rows = Array.from(document.querySelectorAll('#depthContent .depth-row:not(.skeleton-row)'));
-            const firstRow = rows[0];
-            const cells = firstRow ? Array.from(firstRow.querySelectorAll('div')) : [];
-            const cellTexts = cells.map(c => c.innerText.trim());
+            const lines = document.body.innerText.split('\n');
+            let maxLot = 0;
 
-            // In Tavan (Bid Side), usually: [Price] [Lot] [Count]
-            const rawLotStr = cellTexts[1] || "0";
+            lines.forEach(line => {
+                // Heuristics to skip non-lot lines
+                if (line.includes(':') || line.length > 50) return;
+
+                const nums = line.match(/\d+/g);
+                if (!nums) return;
+
+                // Join nums to handle "12.345" formatting if split
+                const cleanNum = parseInt(nums.join('').replace(/\D/g, ''), 10);
+
+                // Lots are usually integers > 100 and < 100M
+                // P.S. A "Ceiling" lot is usually the highest specific number in the depth table
+                if (cleanNum > 100 && cleanNum < 50000000) {
+                    if (cleanNum > maxLot) maxLot = cleanNum;
+                }
+            });
 
             return {
-                symbol: getTxt('symbolDisplay'),
-                priceStr: priceStr,
-                ceilingStr: ceilingStr,
-                rawLotStr: rawLotStr,
-                allCells: cellTexts,
-                price: parseNum(priceStr),
-                ceiling: parseNum(ceilingStr),
-                topBidLot: parseNum(rawLotStr, true), // Passing true for Lot parsing
-                isCeiling: (priceStr !== "" && priceStr === ceilingStr)
+                priceStr: price,
+                topBidLot: maxLot,
+                isCeiling: false // Difficult to detect "Ceiling" text reliably, relying on lot presence
             };
         });
 
-        if (data) {
-            console.log(`[DEBUG] ${symbol} -> Cells: [${data.allCells.join(' | ')}], Calculated Lot: ${data.topBidLot}`);
-            // Safety check: if read lot is suspiciously small (like the price), log a warning
-            if (data.topBidLot < 1000) {
-                console.log(`[WARN] ${symbol} lot count (${data.topBidLot}) seems too low. Check if columns shifted.`);
-            }
-        }
+        console.log(`[SCRAPER] ${symbol} -> Lot: ${data.topBidLot}`);
 
-        return data;
+        return {
+            symbol,
+            priceStr: data.priceStr,
+            ceilingStr: data.priceStr, // Assume ceiling for now
+            topBidLot: data.topBidLot,
+            isCeiling: data.topBidLot > 0
+        };
 
-    } catch (error) {
-        console.error(`Puppeteer Error (${symbol}):`, error.message);
+    } catch (e) {
+        console.error(`Puppeteer Error (${symbol}):`, e.message);
         return null;
     } finally {
         if (browser) await browser.close();
