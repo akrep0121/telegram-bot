@@ -57,13 +57,35 @@ async function startUserbot() {
     }
 }
 
+async function sendStartToBot() {
+    if (!client.connected) {
+        await startUserbot();
+    }
+
+    try {
+        console.log(`[AUTH] Sending /start to ${config.TARGET_BOT_USERNAME}...`);
+        await client.sendMessage(config.TARGET_BOT_USERNAME, { message: '/start' });
+        console.log(`[AUTH] /start sent successfully!`);
+        // Wait for bot to process
+        await new Promise(r => setTimeout(r, 2000));
+        return true;
+    } catch (error) {
+        console.error("[AUTH] Error sending /start:", error.message);
+        return false;
+    }
+}
+
 async function getFreshWebAppUrl() {
     if (!client.connected) {
         await startUserbot();
     }
 
     try {
-        // Request WebView with URL (required for this bot)
+        // STEP 1: Send /start to warm up the session
+        await sendStartToBot();
+
+        // STEP 2: Request WebView URL
+        console.log(`[AUTH] Requesting WebApp URL...`);
         const result = await client.invoke(
             new Api.messages.RequestWebView({
                 peer: config.TARGET_BOT_USERNAME,
