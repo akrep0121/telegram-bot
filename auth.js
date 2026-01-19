@@ -108,50 +108,73 @@ async function getFreshWebAppUrl() {
 // We use the Userbot's "Saved Messages" (peer: "me") to store the database.
 // This prevents cluttering the public channel.
 
-async function saveWatchedStocks(stocks) {
+async function saveAppState(state) {
     if (!client.connected) await startUserbot();
     try {
-        const jsonStr = JSON.stringify(stocks);
-        const dbTag = "#DATABASE_V1";
-        const messageText = `${dbTag}\n${jsonStr}\n\nDO NOT DELETE THIS MESSAGE (Bot Memory)`;
+        // state = { stocks: [], isBotActive: true/false }
+        const jsonStr = JSON.stringify(state);
+        const dbTag = "#DATABASE_V2"; // Version bump
+        const messageText = `${dbTag}\n${jsonStr}\n\nDO NOT DELETE THIS MESSAGE (Bot Memory V2)`;
 
         // Search for existing DB message in Saved Messages
         const history = await client.getMessages("me", { search: dbTag, limit: 1 });
 
         if (history && history.length > 0) {
-            // Edit existing
             await client.editMessage("me", { message: history[0].id, text: messageText });
-            console.log("Database updated in Saved Messages.");
+            console.log("Database V2 updated in Saved Messages.");
         } else {
-            // Create new
             await client.sendMessage("me", { message: messageText });
-            console.log("New Database created in Saved Messages.");
+            console.log("New Database V2 created in Saved Messages.");
         }
     } catch (e) {
         console.error("Cloud Save Error:", e);
     }
 }
 
-async function loadWatchedStocks() {
+async function loadAppState() {
     if (!client.connected) await startUserbot();
     try {
-        const dbTag = "#DATABASE_V1";
+        const dbTag = "#DATABASE_V2";
         const history = await client.getMessages("me", { search: dbTag, limit: 1 });
 
         if (history && history.length > 0) {
-            const text = history[0].text;
-            // Extract JSON (line 2)
-            const lines = text.split('\n');
-            if (lines.length >= 2) {
-                const data = JSON.parse(lines[1]);
-                console.log("Loaded stocks from Cloud:", data);
-                return data;
+            const lines = history[0].message.split('\n');
+            const jsonStr = lines[1];
+            const state = JSON.parse(jsonStr);
+            console.log(`Loaded Cloud DB V2: ${state.stocks.length} stocks, Active: ${state.isBotActive}`);
+            return state;
+        } else {
+            // Try loading V1 (Legacy migration)
+            const v1 = await loadWatchedStocksV1();
+            if (v1.length > 0) {
+                console.log("Migrating V1 DB to V2...");
+                return { stocks: v1, isBotActive: true };
             }
         }
+        return { stocks: [], isBotActive: true };
     } catch (e) {
         console.error("Cloud Load Error:", e);
+        return { stocks: [], isBotActive: true };
     }
-    return [];
 }
 
-module.exports = { startUserbot, getFreshWebAppUrl, saveWatchedStocks, loadWatchedStocks };
+// Legacy V1 loader
+async function loadWatchedStocksV1() {
+    try {
+        const dbTag = "#DATABASE_V1";
+        const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+        if (history && history.length > 0) {
+            const lines = history[0].message.split('\n');
+            return JSON.parse(lines[1]);
+        }
+        return [];
+    } catch (e) { return []; }
+}
+
+module.exports = {
+    startUserbot,
+    getFreshWebAppUrl,
+    saveAppState,
+    loadAppState,
+    sendStartToBot
+};

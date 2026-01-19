@@ -59,16 +59,18 @@ bot.use(async (ctx, next) => {
 // Commands
 bot.command("start", (ctx) => ctx.reply(`Bot çalışıyor! Sizin ID'niz: ${ctx.from.id}\nBu ID'yi Render.com'da ADMIN_ID olarak eklerseniz bot kilitlenir.`));
 
-bot.command("pasif", (ctx) => {
+bot.command("pasif", async (ctx) => {
     isBotActive = false;
-    ctx.reply("⏸️ Bot PASİF moda alındı. Otomatik veri çekme durduruldu.");
+    ctx.reply("⏸️ Bot PASİF moda alındı. Durum buluta kaydedildi.");
     console.log("[SYSTEM] Bot set to PASSIVE mode.");
+    await updatePersistence(null, null);
 });
 
-bot.command("aktif", (ctx) => {
+bot.command("aktif", async (ctx) => {
     isBotActive = true;
-    ctx.reply("▶️ Bot AKTİF moda alındı. Otomatik veri çekme başlatılıyor...");
+    ctx.reply("▶️ Bot AKTİF moda alındı. Durum buluta kaydedildi.");
     console.log("[SYSTEM] Bot set to ACTIVE mode.");
+    await updatePersistence(null, null);
 
     // Trigger immediate check if not running
     if (!isCheckRunning) {
@@ -103,11 +105,12 @@ bot.command("liste", (ctx) => {
 // Update the cache/persistence whenever it changes
 async function updatePersistence(msg, ctx) {
     try {
-        await auth.saveWatchedStocks(watchedStocks);
-        if (ctx) await ctx.reply(msg);
+        // Save both stocks and active state
+        await auth.saveAppState({ stocks: watchedStocks, isBotActive: isBotActive });
+        if (msg && ctx) await ctx.reply(msg);
     } catch (e) {
         console.error("Persistence error:", e);
-        if (ctx) await ctx.reply("⚠️ Liste güncellendi ama buluta kaydedilirken hata oluştu.");
+        if (ctx) await ctx.reply("⚠️ Durum güncellendi ama buluta kaydedilirken hata oluştu.");
     }
 }
 
@@ -194,7 +197,7 @@ bot.command("test", async (ctx) => {
         return ctx.reply("Takip listeniz boş.");
     }
 
-    const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...\nLütfen bekleyin...`);
+    const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)....\nLütfen bekleyin...`);
 
     for (let i = 0; i < watchedStocks.length; i++) {
         const stock = watchedStocks[i];
@@ -420,14 +423,23 @@ bot.catch((err) => {
     console.log("Bot starting...");
     await auth.startUserbot();
 
-    // Load Stocks from Cloud (Telegram Saved Messages)
-    console.log("☁️ Loading stocks from cloud...");
-    const cloudStocks = await auth.loadWatchedStocks();
-    if (cloudStocks.length > 0) {
-        watchedStocks = cloudStocks;
-        console.log(`✅ Loaded ${watchedStocks.length} stocks from cloud: ${watchedStocks.join(", ")}`);
+    // Load State from Cloud (Telegram Saved Messages)
+    console.log("☁️ Loading state from cloud (V2)...");
+    const cloudState = await auth.loadAppState();
+
+    // Restore Stocks
+    if (cloudState.stocks && cloudState.stocks.length > 0) {
+        watchedStocks = cloudState.stocks;
+        console.log(`✅ Loaded ${watchedStocks.length} stocks from cloud.`);
+    }
+
+    // Restore Active State
+    if (cloudState.isBotActive !== undefined) {
+        isBotActive = cloudState.isBotActive;
+        console.log(`✅ Restored Bot Mode: ${isBotActive ? 'ACTIVE' : 'PASSIVE'}`);
     } else {
-        console.log("ℹ️ No stocks found in cloud (or empty). Using defaults or empty list.");
+        console.log("ℹ️ No active state found, defaulting to ACTIVE.");
+        isBotActive = true;
     }
 
     console.log("🤖 Starting Telegram Bot...");
