@@ -19,8 +19,8 @@ async function fetchMarketData(url, symbol) {
         await page.setUserAgent(USER_AGENTS[0]);
 
         // Step 1: Rapid Navigation
-        console.log(`[GHOST] Navigating to web app...`);
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 35000 });
+        console.log(`[GHOST] Navigating to: ${url.substring(0, 60)}...`);
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
         // Step 2: Session Recovery (THE GHOST PROTOCOL)
         console.log(`[GHOST] Checking for session expiration...`);
