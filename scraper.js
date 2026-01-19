@@ -237,34 +237,44 @@ async function fetchMarketData(url, symbol) {
             };
             const price = getPrice();
 
-            // Try to find lot cells
-            const cells = Array.from(document.querySelectorAll('div, span, td'));
-            // Filter for numeric-looking cells that are likely lots (integer, high value)
-
             const lines = document.body.innerText.split('\n');
             let maxLot = 0;
+            const currentYear = new Date().getFullYear();
 
+            // Collect all candidate numbers for debugging inside evaluate if needed
+            // identifying lots: integers, large, not years
             lines.forEach(line => {
                 // Heuristics to skip non-lot lines
                 if (line.includes(':') || line.length > 50) return;
 
-                const nums = line.match(/\d+/g);
+                // Remove thousands separators
+                const cleanLine = line.replace(/\./g, '').replace(/,/g, '');
+
+                const nums = cleanLine.match(/\d+/g);
                 if (!nums) return;
 
-                // Join nums to handle "12.345" formatting if split
-                const cleanNum = parseInt(nums.join('').replace(/\D/g, ''), 10);
+                nums.forEach(nStr => {
+                    const n = parseInt(nStr, 10);
 
-                // Lots are usually integers > 100 and < 100M
-                // P.S. A "Ceiling" lot is usually the highest specific number in the depth table
-                if (cleanNum > 100 && cleanNum < 50000000) {
-                    if (cleanNum > maxLot) maxLot = cleanNum;
-                }
+                    // Filter:
+                    // 1. Must be > 100
+                    // 2. Must be < 100M
+                    // 3. Must NOT be a year (2024, 2025, 2026, 2027 ± 1)
+                    // 4. Must NOT be commonly found static numbers (like 1800, 900 if those are persistent UI elements)
+
+                    if (n > 100 && n < 50000000) {
+                        // Strict Year Filter
+                        if (n >= currentYear - 1 && n <= currentYear + 2) return;
+
+                        if (n > maxLot) maxLot = n;
+                    }
+                });
             });
 
             return {
                 priceStr: price,
                 topBidLot: maxLot,
-                isCeiling: false // Difficult to detect "Ceiling" text reliably, relying on lot presence
+                isCeiling: false
             };
         });
 
