@@ -170,18 +170,20 @@ async function sendStatusReport(isTest = false, targetChatId = null, skipChannel
 
 // Commands
 bot.command("test", async (ctx) => {
-    console.log(`[COMMAND] RECEIVED /test from ${ctx.from.id} on Instance ${INSTANCE_ID}`);
+    console.log(`[COMMAND] RECEIVED /test on Instance ${INSTANCE_ID}`);
 
     if (watchedStocks.length === 0) {
         return ctx.reply("Takip listeniz boş.");
     }
 
-    await ctx.reply(`🔍 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...`);
+    const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...\nLütfen bekleyin...`);
     const url = await auth.getFreshWebAppUrl();
 
     if (url) {
-        for (const stock of watchedStocks) {
-            console.log(`[TEST] Scraping ${stock}...`);
+        for (let i = 0; i < watchedStocks.length; i++) {
+            const stock = watchedStocks[i];
+            console.log(`[COLOSSUS] Scrape start: ${stock}`);
+
             const data = await scraper.fetchMarketData(url, stock);
             if (data && data.topBidLot > 0) {
                 marketCache[stock] = {
@@ -189,8 +191,10 @@ bot.command("test", async (ctx) => {
                     initialAvg: data.topBidLot,
                     lastLot: data.topBidLot
                 };
+                await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n✅ ${stock} tamamlandı: ${fmtNum(data.topBidLot)} Lot`);
+            } else {
+                await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n⚠️ ${stock} verisi alınamadı.`);
             }
-            // Small delay between stocks to be safe
             await new Promise(r => setTimeout(r, 1000));
         }
     }

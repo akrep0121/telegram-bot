@@ -4,7 +4,6 @@ puppeteer.use(StealthPlugin());
 
 const fs = require('fs');
 
-// Random User Agents
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -22,39 +21,39 @@ async function fetchMarketData(url, symbol) {
         const page = await browser.newPage();
         await page.setViewport({ width: 390, height: 844 });
 
-        // Navigation
-        let retries = 2;
-        while (retries > 0) {
+        // Step 1: Navigation
+        let navRetries = 2;
+        while (navRetries > 0) {
             try {
                 await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
                 break;
             } catch (e) {
-                retries--;
-                if (retries === 0) throw e;
+                navRetries--;
+                if (navRetries === 0) throw e;
                 await new Promise(r => setTimeout(r, 2000));
             }
         }
 
-        // Search Interaction
-        const searchPath = '#addSymbolInput, #searchInput, input[placeholder*="Ara"]';
-        const input = await page.waitForSelector(searchPath, { timeout: 10000 });
+        // Step 2: Search for Symbol
+        const inputSelector = '#addSymbolInput, #searchInput, input[placeholder*="Ara"]';
+        await page.waitForSelector(inputSelector, { timeout: 10000 });
 
         await page.evaluate((sel, sym) => {
-            const el = document.querySelector(sel);
-            if (el) {
-                el.value = '';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
+            const input = document.querySelector(sel);
+            if (input) {
+                input.value = '';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
             }
-        }, searchPath, symbol);
+        }, inputSelector, symbol);
 
-        await input.click();
+        await page.click(inputSelector);
         await page.keyboard.type(symbol, { delay: 100 });
         await page.keyboard.press('Enter');
 
-        // Aggressive Result Search (Wait up to 10s for the item)
-        let found = false;
+        // Step 3: Click Result
+        let resultClicked = false;
         for (let i = 0; i < 20; i++) {
-            found = await page.evaluate((s) => {
+            resultClicked = await page.evaluate((s) => {
                 const results = document.querySelector('#searchResults') || document.body;
                 const match = Array.from(results.querySelectorAll('*')).find(el => {
                     const t = el.innerText?.trim().toUpperCase() || "";
@@ -62,131 +61,110 @@ async function fetchMarketData(url, symbol) {
                 });
                 if (match) {
                     match.click();
+                    match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    match.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                     match.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                     return true;
                 }
                 return false;
             }, symbol);
-            if (found) break;
+            if (resultClicked) break;
             await new Promise(r => setTimeout(r, 500));
         }
 
-        if (!found) {
-            // Last resort: Click first child of results
-            const first = await page.$('#searchResults > div, .search-row, .result-item');
-            if (first) await first.click();
-            else throw new Error(`${symbol} arama sonucunda bulunamadı.`);
+        if (!resultClicked) {
+            const firstChild = await page.$('#searchResults > div, .search-row');
+            if (firstChild) await firstChild.click();
+            else throw new Error(`${symbol} bulunamadı.`);
         }
 
-        // Wait for detail view
-        await new Promise(r => setTimeout(r, 4000));
-        await page.screenshot({ path: 'detail_view_loaded.png' }); // Verify where we are
-
-        // AGRESSIVE TAB CLICKING (Derinlik)
+        // Step 4: Open Depth Tab
+        await new Promise(r => setTimeout(r, 3000));
         await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button, div, span, a'));
-            const depthBtn = buttons.find(b => b.innerText && b.innerText.toLowerCase().includes('derinlik'));
-            if (depthBtn) {
-                // Focus it
-                depthBtn.focus();
-                // Multiple triggers
-                const events = ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'];
-                events.forEach(evt => {
-                    depthBtn.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                });
-                // Standard DOM click
-                depthBtn.click();
-            }
+            const buttons = Array.from(document.querySelectorAll('button, div, span'));
+            const depthBtn = buttons.find(b => b.innerText.toLowerCase().includes('derinlik'));
+            if (depthBtn) depthBtn.click();
         });
 
-        // WAIT FOR DEPTH CONTENT (Alış / Lot columns)
-        let depthLoaded = false;
-        for (let i = 0; i < 10; i++) {
-            depthLoaded = await page.evaluate(() => {
-                const text = document.body.innerText;
-                // Proof we are in the depth tab: headers "Alış" and "Lot" are visible
-                return text.includes('Alış') && text.includes('Lot');
-            });
-            if (depthLoaded) break;
-            await new Promise(r => setTimeout(r, 1000));
-        }
+        // Step 5: Wait for Data & Extract (THE COLOSSUS LOGIC)
+        await new Promise(r => setTimeout(r, 4000)); // Initial patience
 
-        // WAIT FOR DIGITS (The data rows)
-        let dataReady = false;
-        for (let i = 0; i < 15; i++) {
-            dataReady = await page.evaluate(() => {
-                const area = document.querySelector('#depthContent, #detailView, .depth-table') || document.body;
-                const text = area.innerText;
-                const rows = text.split('\n').filter(line => {
-                    const digits = (line.match(/\d/g) || []).length;
-                    return digits >= 4 && !line.includes(':'); // Ensure it's not a time range
-                });
-                return rows.length > 0;
-            });
-            if (dataReady) break;
-            await new Promise(r => setTimeout(r, 1000));
-        }
+        const data = await page.evaluate((sym) => {
+            const parseNum = (s) => {
+                if (!s) return 0;
+                // ULTIMATE TIME MASKING: Remove anything like 15:30 or 15.30
+                let masked = s.replace(/\d{1,2}[:.]\d{2}/g, ' ');
+                // Remove all non-digits
+                return parseInt(masked.replace(/\D/g, ''), 10) || 0;
+            };
 
-        const stats = await page.evaluate(() => {
-            const parseNum = (s) => parseInt(s.replace(/\D/g, ''), 10) || 0;
-            const getPrice = (id) => document.getElementById(id)?.innerText || "";
+            const getTxt = (id) => document.getElementById(id)?.innerText || "";
+            let pStr = getTxt('lastPrice');
+            let cStr = getTxt('infoCeiling');
 
-            let price = getPrice('lastPrice');
-            let ceiling = getPrice('infoCeiling');
+            // Collect all rows and rank them
+            const container = document.querySelector('#depthContent') || document.body;
+            const rows = container.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 5);
 
-            const allText = document.body.innerText;
-            const lines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            // Meta-data to skip
+            const months = ["ocak", "subat", "mart", "nisan", "mayis", "haziran", "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik"];
+            const isHeader = (l) => /Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa/i.test(l);
+            const isDate = (l) => {
+                const low = l.toLowerCase();
+                return months.some(m => low.includes(m)) || /2025|2026|2027/.test(l);
+            };
 
-            // Filters
-            const months = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
-            const monthRegex = new RegExp(months.join('|'), 'i');
-            const timeRegex = /\d{2}:\d{2}/; // Matches 09:00, 18:00 etc.
-
-            // Find rows that look like depth data
-            const dataRows = lines.filter(l => {
-                const digitCount = (l.match(/\d/g) || []).length;
-                const isHeader = /Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa/i.test(l);
-                const isDate = monthRegex.test(l) || /2025|2026|2027/.test(l);
-                const isTime = timeRegex.test(l);
-                // Row should have digits, not be a header, not a date, and not a time range
-                return digitCount >= 4 && !isHeader && !isDate && !isTime;
-            });
+            // Rank rows by relevance
+            // A good depth row:
+            // 1. Not header, not date
+            // 2. Has at least 3 numeric parts
+            // 3. Does not contain time separators like ':'
+            const validRows = rows.filter(l => !isHeader(l) && !isDate(l) && !l.includes(':'));
 
             let topLot = 0;
             let bestRow = "";
-            dataRows.forEach(row => {
-                const parts = row.split(/\s+/).map(p => parseNum(p));
-                // Lot should be larger than 100, and not look like a Year or specific UI labels like 1800
-                const candidates = parts.filter(p => p > 100 && p !== 2025 && p !== 2026 && p !== 1800);
-                const max = candidates.length > 0 ? Math.max(...candidates) : 0;
 
-                if (max > topLot) {
-                    topLot = max;
-                    bestRow = row;
+            validRows.forEach(row => {
+                // Split row into numeric chunks
+                // Masking time again just in case a colon was missed
+                const maskedRow = row.replace(/\d{1,2}[:.]\d{2}/g, ' ');
+                const chunks = maskedRow.split(/\s+/).map(c => parseNum(c)).filter(n => n > 100);
+
+                if (chunks.length >= 2) {
+                    // Usually [Price, Lot, Count] or [Lot, Price, Count]
+                    // The lot is almost always the LARGEST number (unless it's a very low volume stock, handled by n > 100)
+                    const max = Math.max(...chunks);
+                    // Specific exclusions for common UI labels that might look like lots
+                    if (max === 1800 || max === 900 || max === 1730 || max === 1805) return;
+
+                    if (max > topLot) {
+                        topLot = max;
+                        bestRow = row;
+                    }
                 }
             });
 
             return {
-                priceStr: price,
-                ceilingStr: ceiling,
+                priceStr: pStr,
+                ceilingStr: cStr,
                 topBidLot: topLot,
                 bestRow: bestRow,
-                allLines: lines.slice(0, 50)
+                debugRows: validRows.slice(0, 5)
             };
-        });
+        }, symbol);
 
-        console.log(`[DEBUG] ${symbol} Result -> Lot: ${stats.topBidLot}, Row: ${stats.bestRow}`);
+        console.log(`[COLOSSUS] ${symbol} -> Lot: ${data.topBidLot} (Row: "${data.bestRow}")`);
 
         return {
             symbol,
-            priceStr: stats.priceStr || "0",
-            ceilingStr: stats.ceilingStr || "0",
-            topBidLot: stats.topBidLot,
-            isCeiling: true // Default true for alerts if lot > 0, logic in index.js will refine
+            priceStr: data.priceStr,
+            ceilingStr: data.ceilingStr,
+            topBidLot: data.topBidLot,
+            isCeiling: data.topBidLot > 0 // Logic in index.js will refine
         };
 
     } catch (e) {
-        console.error(`[SCRAPE ERROR] ${symbol}: ${e.message}`);
+        console.error(`[COLOSSUS ERROR] ${symbol}: ${e.message}`);
         return null;
     } finally {
         if (browser) await browser.close();
