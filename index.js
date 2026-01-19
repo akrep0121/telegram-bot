@@ -167,20 +167,28 @@ async function sendStatusReport(isTest = false, targetChatId = null) {
 bot.command("test", async (ctx) => {
     console.log("✅ RECEIVED /test command");
 
-    // If cache is empty, try a quick scrape for the first 2 stocks
-    if (Object.keys(marketCache).length === 0) {
-        await ctx.reply("Takip listesi boş veya veri henüz çekilmemiş. Hemen bir sorgu deniyorum...");
-        const url = await auth.getFreshWebAppUrl();
-        if (url && watchedStocks.length > 0) {
-            const stock = watchedStocks[0];
-            await ctx.reply(`${stock} için canlı sorgu başlatıldı...`);
-            const data = await scraper.fetchMarketData(url, stock);
-            if (data) {
-                marketCache[stock] = { history: [data.topBidLot], initialAvg: data.topBidLot, lastLot: data.topBidLot };
+    const firstStock = watchedStocks[0];
+    const cache = marketCache[firstStock];
+
+    if (!cache || cache.lastLot === 0) {
+        if (watchedStocks.length > 0) {
+            await ctx.reply(`Takip listesi hazır. ${firstStock} için canlı veriyi şimdi çekiyorum...`);
+            const url = await auth.getFreshWebAppUrl();
+            if (url) {
+                const data = await scraper.fetchMarketData(url, firstStock);
+                if (data) {
+                    marketCache[firstStock] = {
+                        history: [data.topBidLot],
+                        initialAvg: data.topBidLot,
+                        lastLot: data.topBidLot
+                    };
+                }
             }
+        } else {
+            return ctx.reply("Takip listeniz boş. Önce /ekle ile hisse ekleyin.");
         }
     } else {
-        await ctx.reply("Mevcut veriler raporlanıyor...");
+        await ctx.reply("Sistem aktif, mevcut tavan verileri raporlanıyor...");
     }
 
     await sendStatusReport(true, ctx.chat.id);
