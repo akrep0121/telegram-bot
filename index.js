@@ -120,7 +120,7 @@ function getTrTime() {
 // Logic state for reports
 let lastReportHour = -1;
 
-async function sendStatusReport(isTest = false, targetChatId = null) {
+async function sendStatusReport(isTest = false, targetChatId = null, skipChannel = false) {
     if (watchedStocks.length === 0) {
         if (targetChatId) await bot.api.sendMessage(targetChatId, "Takip listeniz boş.");
         return;

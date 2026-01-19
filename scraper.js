@@ -106,25 +106,30 @@ async function fetchMarketData(url, symbol) {
             let price = getPrice('lastPrice');
             let ceiling = getPrice('infoCeiling');
 
-            // Global discovery if ID fails
             const allText = document.body.innerText;
             const lines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-            // Find rows that look like: [Price] [Lot] [Count]
-            // We search for lines that have digits and look like they belong to a depth table
+            // Month names to skip
+            const months = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
+            const monthRegex = new RegExp(months.join('|'), 'i');
+
+            // Find rows that look like depth data
             const dataRows = lines.filter(l => {
-                const partCount = l.split(/\s+/).length;
                 const digitCount = (l.match(/\d/g) || []).length;
                 const isHeader = /Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa/i.test(l);
-                return digitCount >= 4 && !isHeader;
+                const isDate = monthRegex.test(l) || /2025|2026|2027/.test(l);
+                // Row should have digits, not be a header, and not be a date
+                return digitCount >= 4 && !isHeader && !isDate;
             });
 
-            // Extract Lot from the best candidates
             let topLot = 0;
             let bestRow = "";
             dataRows.forEach(row => {
+                // Split by space and find numbers. Candidates for lot should be large.
                 const parts = row.split(/\s+/).map(p => parseNum(p));
-                const max = Math.max(...parts);
+                const candidates = parts.filter(p => p > 100 && p !== 2025 && p !== 2026);
+                const max = candidates.length > 0 ? Math.max(...candidates) : 0;
+
                 if (max > topLot) {
                     topLot = max;
                     bestRow = row;
@@ -136,7 +141,7 @@ async function fetchMarketData(url, symbol) {
                 ceilingStr: ceiling,
                 topBidLot: topLot,
                 bestRow: bestRow,
-                allLines: lines.slice(0, 50) // For debug
+                allLines: lines.slice(0, 50)
             };
         });
 
