@@ -212,21 +212,44 @@ async function fetchMarketData(url, symbol) {
 
         // CLICK DEPTH TAB
         console.log(`[SCRAPER] ${symbol} - Opening Depth Loop...`);
+        let depthSuccess = false;
+
         // Retry clicking depth tab distinct times
         for (let i = 0; i < 3; i++) {
-            const depthClicked = await page.evaluate(() => {
-                const tabs = Array.from(document.querySelectorAll('button, div, span, a'));
-                const depth = tabs.find(t => (t.innerText || "").toLowerCase().includes('derinlik'));
+            const clickResult = await page.evaluate(() => {
+                const tabs = Array.from(document.querySelectorAll('button, div, span, a, li'));
+                const depth = tabs.find(t => {
+                    const txt = (t.innerText || "").toLowerCase().trim();
+                    return txt === 'derinlik' || txt.includes('derinlik');
+                });
+
                 if (depth) {
                     depth.click();
-                    return true;
+                    return `clicked: "${depth.innerText}" tag:${depth.tagName}`;
                 }
-                return false;
+                return "not_found";
             });
-            if (depthClicked) break;
+
+            console.log(`[SCRAPER] ${symbol} - Depth click attempt ${i + 1}: ${clickResult}`);
+
+            if (clickResult !== "not_found") {
+                depthSuccess = true;
+                break;
+            }
             await new Promise(r => setTimeout(r, 1000));
         }
-        await new Promise(r => setTimeout(r, 3000));
+
+        await new Promise(r => setTimeout(r, 4000));
+
+        // DEBUG: Check if we are actually on the depth tab
+        const depthCheck = await page.evaluate(() => {
+            const body = document.body.innerText;
+            return {
+                hasLotHeader: body.includes('Lot') || body.includes('Alış'),
+                sample: body.slice(0, 300).replace(/\n/g, ' ')
+            };
+        });
+        console.log(`[DEBUG] ${symbol} After Depth Click: HasLotHeader=${depthCheck.hasLotHeader}, Content=${depthCheck.sample}`);
 
         // EXTRACT LOOP (Wait for data)
         console.log(`[SCRAPER] ${symbol} - Extracting...`);
