@@ -172,28 +172,30 @@ async function sendStatusReport(isTest = false, targetChatId = null, skipChannel
 bot.command("test", async (ctx) => {
     console.log(`[COMMAND] RECEIVED /test from ${ctx.from.id} on Instance ${INSTANCE_ID}`);
 
-    const firstStock = watchedStocks[0];
-    if (watchedStocks.length > 0) {
-        await ctx.reply(`🔍 [ID: ${INSTANCE_ID}] Canlı veri kontrolü başlatıldı: ${firstStock}...`);
-        const url = await auth.getFreshWebAppUrl();
-        if (url) {
-            const data = await scraper.fetchMarketData(url, firstStock);
+    if (watchedStocks.length === 0) {
+        return ctx.reply("Takip listeniz boş.");
+    }
+
+    await ctx.reply(`🔍 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...`);
+    const url = await auth.getFreshWebAppUrl();
+
+    if (url) {
+        for (const stock of watchedStocks) {
+            console.log(`[TEST] Scraping ${stock}...`);
+            const data = await scraper.fetchMarketData(url, stock);
             if (data && data.topBidLot > 0) {
-                marketCache[firstStock] = {
+                marketCache[stock] = {
                     history: [data.topBidLot],
                     initialAvg: data.topBidLot,
                     lastLot: data.topBidLot
                 };
-                await ctx.reply(`✅ Veri başarıyla çekildi: ${fmtNum(data.topBidLot)} Lot`);
-            } else {
-                await ctx.reply(`⚠️ Veri çekilemedi veya lot değeri 0 geldi. Sayfa tam yüklenmemiş olabilir.`);
             }
+            // Small delay between stocks to be safe
+            await new Promise(r => setTimeout(r, 1000));
         }
-    } else {
-        return ctx.reply("Takip listeniz boş.");
     }
 
-    await sendStatusReport(true, ctx.chat.id, true); // true as 3rd param skips the channel
+    await sendStatusReport(true, ctx.chat.id, true);
 });
 
 // Main Loop
