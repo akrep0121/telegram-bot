@@ -2,7 +2,6 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
-// Simple Telegram mock
 const TELEGRAM_MOCK = `
     window.Telegram = {
         WebApp: {
@@ -30,68 +29,91 @@ async function fetchMarketData(url, symbol) {
         await page.setUserAgent('Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36');
         await page.evaluateOnNewDocument(TELEGRAM_MOCK);
 
-        // STEP 1: Navigate - don't overthink it
         console.log(`[S] ${symbol} - Navigate`);
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 4000));
+        await new Promise(r => setTimeout(r, 3000));
 
-        // STEP 2: Find search input - we know it exists based on logs
-        console.log(`[S] ${symbol} - Find input`);
+        // TRY TO DISMISS MODAL BY CLICKING AT VARIOUS COORDINATES
+        console.log(`[S] ${symbol} - Trying to dismiss modal...`);
+
+        // Try clicking in different areas
+        const clickPoints = [
+            { x: 195, y: 750 },  // Bottom center (likely OK button location)
+            { x: 195, y: 700 },  // Above that
+            { x: 195, y: 650 },  // Above that
+            { x: 195, y: 420 },  // Middle of screen
+            { x: 350, y: 50 },   // Top right (close X button)
+            { x: 40, y: 50 },    // Top left
+        ];
+
+        for (let i = 0; i < clickPoints.length; i++) {
+            const pt = clickPoints[i];
+            await page.mouse.click(pt.x, pt.y);
+            await new Promise(r => setTimeout(r, 500));
+        }
+
+        // Also try keyboard
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('Space');
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Check if modal is gone
+        const afterClicks = await page.evaluate(() => document.body.innerText.slice(0, 200));
+        console.log(`[S] ${symbol} - After clicks: ${afterClicks.replace(/\s+/g, ' ').slice(0, 100)}`);
+
+        // Find and use search input
+        console.log(`[S] ${symbol} - Search`);
         const inputSel = 'input';
-        let input;
         try {
-            await page.waitForSelector(inputSel, { timeout: 10000 });
-            input = await page.$(inputSel);
+            await page.waitForSelector(inputSel, { timeout: 5000 });
         } catch (e) {
             console.log(`[S] ${symbol} - No input!`);
             return null;
         }
 
-        // STEP 3: Click on input to make sure it's focused
-        console.log(`[S] ${symbol} - Click & Type`);
-        await input.click({ clickCount: 3 }); // Triple click to select all
+        // Clear and type
+        const input = await page.$(inputSel);
+        await input.click({ clickCount: 3 });
         await page.keyboard.press('Backspace');
-        await page.keyboard.type(symbol, { delay: 50 });
-        await new Promise(r => setTimeout(r, 2000));
+        await page.keyboard.type(symbol, { delay: 30 });
 
-        // Check what's in the input
-        const inputValue = await page.evaluate(() => {
-            const inp = document.querySelector('input');
-            return inp ? inp.value : "no input";
-        });
-        console.log(`[S] ${symbol} - Input value: "${inputValue}"`);
+        // Verify input
+        const inputVal = await page.evaluate(() => document.querySelector('input')?.value || "");
+        console.log(`[S] ${symbol} - Input: "${inputVal}"`);
 
-        // Press Enter to search
         await page.keyboard.press('Enter');
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 5000)); // Longer wait
 
-        // Dump page to see search results
-        const afterSearch = await page.evaluate(() => document.body.innerText.slice(0, 500));
-        console.log(`[S] ${symbol} - After search: ${afterSearch.replace(/\s+/g, ' ').slice(0, 200)}`);
+        // Dump page content to see if search worked
+        const afterSearch = await page.evaluate(() => {
+            const text = document.body.innerText;
+            return {
+                full: text,
+                hasSymbol: text.toUpperCase().includes('FRMPL') || text.toUpperCase().includes('ZGYO'),
+                length: text.length
+            };
+        });
 
-        // STEP 4: Try to click on the symbol in results
-        console.log(`[S] ${symbol} - Click result`);
-        const clickResult = await page.evaluate((sym) => {
-            const all = Array.from(document.querySelectorAll('*'));
-            // Find element that contains EXACTLY our symbol
-            for (const el of all) {
-                const txt = el.innerText || "";
-                const lines = txt.split('\n');
-                for (const line of lines) {
-                    const clean = line.trim().toUpperCase();
-                    if (clean === sym || clean.startsWith(sym + ' ') || clean.startsWith(sym + '\t')) {
-                        el.click();
-                        return `clicked: ${line.slice(0, 30)}`;
-                    }
+        console.log(`[S] ${symbol} - Page has symbol: ${afterSearch.hasSymbol}, length: ${afterSearch.length}`);
+        console.log(`[S] ${symbol} - Sample: ${afterSearch.full.replace(/\s+/g, ' ').slice(0, 200)}`);
+
+        // Try to click on symbol
+        const clicked = await page.evaluate((sym) => {
+            const elements = Array.from(document.querySelectorAll('*'));
+            for (const el of elements) {
+                const txt = (el.innerText || "").toUpperCase();
+                if (txt.includes(sym) && txt.length < 100) {
+                    el.click();
+                    return "clicked: " + txt.slice(0, 30);
                 }
             }
             return "not found";
         }, symbol);
-        console.log(`[S] ${symbol} - Result: ${clickResult}`);
+        console.log(`[S] ${symbol} - Click: ${clicked}`);
         await new Promise(r => setTimeout(r, 4000));
 
-        // STEP 5: Click Derinlik tab
-        console.log(`[S] ${symbol} - Depth tab`);
+        // Click depth tab
         await page.evaluate(() => {
             const all = Array.from(document.querySelectorAll('*'));
             for (const el of all) {
@@ -103,23 +125,20 @@ async function fetchMarketData(url, symbol) {
         });
         await new Promise(r => setTimeout(r, 4000));
 
-        // STEP 6: Extract - look for numbers that could be lots
+        // Extract data
         console.log(`[S] ${symbol} - Extract`);
         const data = await page.evaluate(() => {
             const body = document.body.innerText;
-            const lines = body.split('\n').filter(l => l.trim().length > 0);
+            const lines = body.split('\n').filter(l => l.trim());
 
             let maxNum = 0;
             let bestLine = "";
 
             lines.forEach(line => {
-                // Skip obvious non-data lines
                 const low = line.toLowerCase();
                 if (low.includes('dakika') || low.includes('telegram') || low.includes('oturum') ||
-                    low.includes('bağlan') || low.includes(':') || low.includes('ocak') ||
-                    low.includes('2026') || low.includes('2025')) return;
+                    low.includes('bağlan') || low.includes(':') || /ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık|2025|2026/i.test(low)) return;
 
-                // Find large numbers (potential lots)
                 const nums = line.match(/\d{4,}/g);
                 if (nums) {
                     nums.forEach(n => {
@@ -132,10 +151,10 @@ async function fetchMarketData(url, symbol) {
                 }
             });
 
-            return { lot: maxNum, row: bestLine, totalLines: lines.length };
+            return { lot: maxNum, row: bestLine, lines: lines.length };
         });
 
-        console.log(`[S] ${symbol} -> Lot: ${data.lot}, Lines: ${data.totalLines}`);
+        console.log(`[S] ${symbol} -> Lot: ${data.lot}, Lines: ${data.lines}`);
         if (data.row) console.log(`[S] ${symbol} - Row: "${data.row.slice(0, 50)}"`);
 
         return {
