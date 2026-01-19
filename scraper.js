@@ -78,21 +78,49 @@ async function fetchMarketData(url, symbol) {
             else throw new Error(`${symbol} arama sonucunda bulunamadı.`);
         }
 
-        // Wait for detail & depth
-        await new Promise(r => setTimeout(r, 3000));
+        // Wait for detail view
+        await new Promise(r => setTimeout(r, 4000));
+        await page.screenshot({ path: 'detail_view_loaded.png' }); // Verify where we are
+
+        // AGRESSIVE TAB CLICKING (Derinlik)
         await page.evaluate(() => {
-            const btn = Array.from(document.querySelectorAll('button, div, span')).find(b => b.innerText.toLowerCase().includes('derinlik'));
-            if (btn) btn.click();
+            const buttons = Array.from(document.querySelectorAll('button, div, span, a'));
+            const depthBtn = buttons.find(b => b.innerText && b.innerText.toLowerCase().includes('derinlik'));
+            if (depthBtn) {
+                // Focus it
+                depthBtn.focus();
+                // Multiple triggers
+                const events = ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'];
+                events.forEach(evt => {
+                    depthBtn.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                });
+                // Standard DOM click
+                depthBtn.click();
+            }
         });
 
-        // WAIT FOR DIGITS (The data)
+        // WAIT FOR DEPTH CONTENT (Alış / Lot columns)
+        let depthLoaded = false;
+        for (let i = 0; i < 10; i++) {
+            depthLoaded = await page.evaluate(() => {
+                const text = document.body.innerText;
+                // Proof we are in the depth tab: headers "Alış" and "Lot" are visible
+                return text.includes('Alış') && text.includes('Lot');
+            });
+            if (depthLoaded) break;
+            await new Promise(r => setTimeout(r, 1000));
+        }
+
+        // WAIT FOR DIGITS (The data rows)
         let dataReady = false;
         for (let i = 0; i < 15; i++) {
             dataReady = await page.evaluate(() => {
                 const area = document.querySelector('#depthContent, #detailView, .depth-table') || document.body;
-                // Look for a row that has multiple digits (Price/Lot)
                 const text = area.innerText;
-                const rows = text.split('\n').filter(line => (line.match(/\d/g) || []).length >= 5);
+                const rows = text.split('\n').filter(line => {
+                    const digits = (line.match(/\d/g) || []).length;
+                    return digits >= 4 && !line.includes(':'); // Ensure it's not a time range
+                });
                 return rows.length > 0;
             });
             if (dataReady) break;
@@ -109,25 +137,27 @@ async function fetchMarketData(url, symbol) {
             const allText = document.body.innerText;
             const lines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-            // Month names to skip
+            // Filters
             const months = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
             const monthRegex = new RegExp(months.join('|'), 'i');
+            const timeRegex = /\d{2}:\d{2}/; // Matches 09:00, 18:00 etc.
 
             // Find rows that look like depth data
             const dataRows = lines.filter(l => {
                 const digitCount = (l.match(/\d/g) || []).length;
                 const isHeader = /Hacim|Fiyat|Lot|Alanlar|Satanlar|Piyasa/i.test(l);
                 const isDate = monthRegex.test(l) || /2025|2026|2027/.test(l);
-                // Row should have digits, not be a header, and not be a date
-                return digitCount >= 4 && !isHeader && !isDate;
+                const isTime = timeRegex.test(l);
+                // Row should have digits, not be a header, not a date, and not a time range
+                return digitCount >= 4 && !isHeader && !isDate && !isTime;
             });
 
             let topLot = 0;
             let bestRow = "";
             dataRows.forEach(row => {
-                // Split by space and find numbers. Candidates for lot should be large.
                 const parts = row.split(/\s+/).map(p => parseNum(p));
-                const candidates = parts.filter(p => p > 100 && p !== 2025 && p !== 2026);
+                // Lot should be larger than 100, and not look like a Year or specific UI labels like 1800
+                const candidates = parts.filter(p => p > 100 && p !== 2025 && p !== 2026 && p !== 1800);
                 const max = candidates.length > 0 ? Math.max(...candidates) : 0;
 
                 if (max > topLot) {
