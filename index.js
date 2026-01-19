@@ -8,6 +8,9 @@ const express = require('express');
 // Hugging Face Spaces Keep-Alive Server
 const app = express();
 const port = process.env.PORT || 7860;
+const INSTANCE_ID = Math.random().toString(36).substring(7).toUpperCase();
+
+console.log(`[SYSTEM] Starting Instance: ${INSTANCE_ID}`);
 
 app.get('/', (req, res) => {
     res.send('Bot is healthy and running! 🚀');
