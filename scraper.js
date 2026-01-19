@@ -214,9 +214,9 @@ async function fetchMarketData(url, symbol) {
         console.log(`[SCRAPER] ${symbol} - Opening Depth Loop...`);
         let depthSuccess = false;
 
-        // Retry clicking depth tab distinct times
+        // Retry clicking depth tab
         for (let i = 0; i < 3; i++) {
-            const clickResult = await page.evaluate(() => {
+            const clickResult = await page.evaluate(async () => {
                 const tabs = Array.from(document.querySelectorAll('button, div, span, a, li'));
                 const depth = tabs.find(t => {
                     const txt = (t.innerText || "").toLowerCase().trim();
@@ -224,22 +224,38 @@ async function fetchMarketData(url, symbol) {
                 });
 
                 if (depth) {
-                    depth.click();
-                    return `clicked: "${depth.innerText}" tag:${depth.tagName}`;
+                    // Scroll into view
+                    depth.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    // Return bounding box for Puppeteer to click
+                    const rect = depth.getBoundingClientRect();
+                    return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: depth.tagName };
                 }
-                return "not_found";
+                return { found: false };
             });
 
-            console.log(`[SCRAPER] ${symbol} - Depth click attempt ${i + 1}: ${clickResult}`);
-
-            if (clickResult !== "not_found") {
+            if (clickResult.found) {
+                console.log(`[SCRAPER] ${symbol} - Clicking Depth at ${clickResult.x}, ${clickResult.y}`);
+                await page.mouse.click(clickResult.x, clickResult.y);
                 depthSuccess = true;
-                break;
+            } else {
+                console.log(`[SCRAPER] ${symbol} - Depth tab not found via text search`);
             }
+
+            // Wait and check if table appeared
+            await new Promise(r => setTimeout(r, 2000));
+            const hasTable = await page.evaluate(() => document.body.innerText.includes('Lot') || document.body.innerText.includes('Alış'));
+
+            if (hasTable) {
+                console.log(`[SCRAPER] ${symbol} - Depth table detected!`);
+                break;
+            } else {
+                console.log(`[SCRAPER] ${symbol} - Depth table NOT detected yet... retrying`);
+            }
+
             await new Promise(r => setTimeout(r, 1000));
         }
 
-        await new Promise(r => setTimeout(r, 4000));
+        await new Promise(r => setTimeout(r, 2000));
 
         // DEBUG: Check if we are actually on the depth tab
         const depthCheck = await page.evaluate(() => {
