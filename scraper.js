@@ -224,21 +224,41 @@ async function fetchMarketData(url, symbol) {
                 });
 
                 if (depth) {
-                    // Scroll into view
+                    // Try to make it visible
                     depth.scrollIntoView({ behavior: 'instant', block: 'center' });
-                    // Return bounding box for Puppeteer to click
+
+                    // Get rect
                     const rect = depth.getBoundingClientRect();
-                    return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: depth.tagName };
+
+                    // Check if rect is valid
+                    if (rect.width > 0 && rect.height > 0) {
+                        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: depth.tagName };
+                    } else {
+                        return { found: true, x: 0, y: 0, tag: "HIDDEN_DEPTH" };
+                    }
                 }
                 return { found: false };
             });
 
             if (clickResult.found) {
-                console.log(`[SCRAPER] ${symbol} - Clicking Depth at ${clickResult.x}, ${clickResult.y}`);
-                await page.mouse.click(clickResult.x, clickResult.y);
+                let clickX = clickResult.x;
+                let clickY = clickResult.y;
+
+                // Fallback for 0,0 (Hidden element) - Guess common position
+                // Depth tab is usually near the top, under the chart
+                if (clickX === 0 && clickY === 0) {
+                    console.log(`[SCRAPER] ${symbol} - Depth element hidden (0,0), using fallback coordinates...`);
+                    clickX = 195; // Center width
+                    clickY = 350; // Approximated height
+                }
+
+                console.log(`[SCRAPER] ${symbol} - Clicking Depth at ${clickX}, ${clickY}`);
+                await page.mouse.click(clickX, clickY);
                 depthSuccess = true;
             } else {
-                console.log(`[SCRAPER] ${symbol} - Depth tab not found via text search`);
+                console.log(`[SCRAPER] ${symbol} - Depth tab text not found, trying blind click...`);
+                // Blind click attempt at likely location
+                await page.mouse.click(280, 420); // Right-middle area
             }
 
             // Wait and check if table appeared
@@ -250,6 +270,8 @@ async function fetchMarketData(url, symbol) {
                 break;
             } else {
                 console.log(`[SCRAPER] ${symbol} - Depth table NOT detected yet... retrying`);
+                // Also try hitting Escape to clear any potential blocking modal
+                await page.keyboard.press('Escape');
             }
 
             await new Promise(r => setTimeout(r, 1000));
