@@ -74,13 +74,13 @@ async function waitForBotResponse(timeoutMs = 25000) {
 
             if (msg && msg.media && msg.media.className === "MessageMediaPhoto") {
                 resolved = true;
-                client.removeEventHandler(handler, new Api.NewMessage({}));
+                client.removeEventHandler(handler, new NewMessage({}));
                 resolve(msg);
             }
         };
 
         // Listen only for incoming messages from the target bot
-        client.addEventHandler(handler, new Api.NewMessage({
+        client.addEventHandler(handler, new NewMessage({
             incoming: true,
             fromUsers: [config.TARGET_BOT_USERNAME]
         }));
@@ -89,7 +89,7 @@ async function waitForBotResponse(timeoutMs = 25000) {
         setTimeout(() => {
             if (!resolved) {
                 resolved = true;
-                client.removeEventHandler(handler, new Api.NewMessage({}));
+                client.removeEventHandler(handler, new NewMessage({}));
                 console.log("[USERBOT] Timeout waiting for response.");
                 resolve(null);
             }
