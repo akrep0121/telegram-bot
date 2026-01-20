@@ -1,488 +1,291 @@
-const { Bot, webhookCallback } = require("grammy");
+const { Bot } = require("grammy");
 const auth = require("./auth");
 const scraper = require("./scraper");
 const config = require("./config");
 const fs = require('fs');
 const express = require('express');
 
-// Hugging Face Spaces Keep-Alive Server
+// --- KEEP-ALIVE SERVER (For Render/HuggingFace) ---
 const app = express();
 const port = process.env.PORT || 7860;
-const INSTANCE_ID = Math.random().toString(36).substring(7).toUpperCase();
+app.get('/', (req, res) => res.send('System V3 Running 🚀'));
+app.listen(port, () => console.log(`Server on port ${port}`));
 
-console.log(`[SYSTEM] Starting Instance: ${INSTANCE_ID}`);
-
-app.get('/', (req, res) => {
-    res.send('Bot is healthy and running! 🚀');
-});
-
-app.listen(port, () => {
-    console.log(`Web server running on port ${port}`);
-});
-
-// Initialize Telegram Bot with custom API configuration for Hugging Face
+// --- TELEGRAM BOT SETUP ---
 const bot = new Bot(config.BOT_TOKEN, {
-    client: {
-        apiRoot: "https://api.telegram.org",
-        timeoutSeconds: 60,
-        canUseWebhookReply: false
-    }
+    client: { apiRoot: "https://api.telegram.org" }
 });
 
-// State
-let watchedStocks = []; // ['SASA', 'THYAO']
-let marketCache = {};   // { 'SASA': { lastLot: 5000, history: [...] } }
-let isCheckRunning = false;
-let lastHeartbeatMin = -1;
-let isBotActive = true; // Control flag for bot activity
-
-// Middleware: Admin Check
-// To lock the bot to YOU only, we need your Telegram User ID.
-// I will add a log to print the ID of anyone who sends a command.
+// Access Control
 bot.use(async (ctx, next) => {
-    const adminId = process.env.ADMIN_ID; // We will set this in Render.com
-    const userId = ctx.from?.id;
-
-    // Log the ID of the person communicating with the bot
-    console.log(`[USER LOG] User: ${ctx.from?.username || "Unknown"} (ID: ${userId}) tried to use: ${ctx.message?.text}`);
-
-    if (adminId) {
-        if (String(userId) !== String(adminId)) {
-            // Uncomment the line below if you want the bot to reply to strangers
-            // return ctx.reply("Bu bot özeldir, sadece sahibi kullanabilir.");
-            return; // Ignore if not admin
-        }
+    const adminId = process.env.ADMIN_ID;
+    if (adminId && String(ctx.from?.id) !== String(adminId)) {
+        console.log(`Unauthorized access attempt: ${ctx.from?.id}`);
+        return;
     }
     await next();
 });
 
-// Commands
-bot.command("start", (ctx) => ctx.reply(`Bot çalışıyor! Sizin ID'niz: ${ctx.from.id}\nBu ID'yi Render.com'da ADMIN_ID olarak eklerseniz bot kilitlenir.`));
+// --- STATE ---
+let watchedStocks = []; // List of symbols
+let stockData = {};     // { 'SASA': { initialLot: 50000, lastLot: 45000 } }
+let isBotActive = true;
+let isCheckRunning = false;
+let lastReportHour = -1;
+
+// --- COMMANDS ---
+
+bot.command("start", async (ctx) => {
+    ctx.reply(`🤖 Bot Hazır!\nID: ${ctx.from.id}\n\nKomutlar:\n/ekle [HİSSE]\n/sil [HİSSE]\n/liste\n/test\n/aktif\n/pasif`);
+});
+
+bot.command("ekle", async (ctx) => {
+    const symbol = ctx.match.toString().toUpperCase().trim();
+    if (!symbol) return ctx.reply("❌ Hatalı kullanım: /ekle SASA");
+    if (watchedStocks.includes(symbol)) return ctx.reply("ℹ️ Zaten listede.");
+
+    watchedStocks.push(symbol);
+    await syncStateToCloud(`✅ ${symbol} eklendi.`);
+});
+
+bot.command("sil", async (ctx) => {
+    const symbol = ctx.match.toString().toUpperCase().trim();
+    if (!watchedStocks.includes(symbol)) return ctx.reply("ℹ️ Listede yok.");
+
+    watchedStocks = watchedStocks.filter(s => s !== symbol);
+    delete stockData[symbol]; // Clear cache
+    await syncStateToCloud(`🗑️ ${symbol} silindi.`);
+});
+
+bot.command("liste", (ctx) => {
+    if (watchedStocks.length === 0) return ctx.reply("📭 Liste boş.");
+
+    let msg = "📋 **Takip Listesi**\n";
+    watchedStocks.forEach(s => {
+        const data = stockData[s];
+        if (data) {
+            msg += `- ${s}: ${fmt(data.lastLot)} Lot (Başlangıç: ${fmt(data.initialLot)})\n`;
+        } else {
+            msg += `- ${s}: Veri bekleniyor...\n`;
+        }
+    });
+    ctx.reply(msg);
+});
 
 bot.command("pasif", async (ctx) => {
     isBotActive = false;
-    ctx.reply("⏸️ Bot PASİF moda alındı. Durum buluta kaydedildi.");
-    console.log("[SYSTEM] Bot set to PASSIVE mode.");
-    await updatePersistence(null, null);
+    await syncStateToCloud("⏸️ Sistem pasife alındı.");
 });
 
 bot.command("aktif", async (ctx) => {
     isBotActive = true;
-    ctx.reply("▶️ Bot AKTİF moda alındı. Durum buluta kaydedildi.");
-    console.log("[SYSTEM] Bot set to ACTIVE mode.");
-    await updatePersistence(null, null);
-
-    // Trigger immediate check if not running
-    if (!isCheckRunning) {
-        checkMarket();
-    }
+    await syncStateToCloud("▶️ Sistem aktif edildi.");
 });
 
-bot.command("ekle", async (ctx) => {
-    const stock = ctx.match.toString().toUpperCase().trim();
-    if (!stock) return ctx.reply("Lütfen hisse adı girin. Örn: /ekle SASA");
-    if (watchedStocks.includes(stock)) return ctx.reply("Bu hisse zaten takipte.");
+// --- CRITICAL: /TEST COMMAND ---
+bot.command("test", async (ctx) => {
+    // 1. Only for Admin (Already handled by middleware, but double check)
+    // 2. Output ONLY to ctx (User), NEVER to Channel.
 
-    watchedStocks.push(stock);
-    // Cloud Save
-    await updatePersistence(`${stock} takibe alındı.`, ctx);
-});
+    if (watchedStocks.length === 0) return ctx.reply("Liste boş, test edilemez.");
 
-bot.command("sil", async (ctx) => {
-    const stock = ctx.match.toString().toUpperCase().trim();
-    if (!watchedStocks.includes(stock)) return ctx.reply("Bu hisse takipte değil.");
-
-    watchedStocks = watchedStocks.filter(s => s !== stock);
-    // Cloud Save
-    await updatePersistence(`${stock} takipten çıkarıldı.`, ctx);
-});
-
-bot.command("liste", (ctx) => {
-    if (watchedStocks.length === 0) return ctx.reply("Takip listeniz boş.");
-    ctx.reply(`Takip edilenler: ${watchedStocks.join(", ")}`);
-});
-
-// Update the cache/persistence whenever it changes
-async function updatePersistence(msg, ctx) {
-    try {
-        // Save both stocks and active state
-        await auth.saveAppState({ stocks: watchedStocks, isBotActive: isBotActive });
-        if (msg && ctx) await ctx.reply(msg);
-    } catch (e) {
-        console.error("Persistence error:", e);
-        if (ctx) await ctx.reply("⚠️ Durum güncellendi ama buluta kaydedilirken hata oluştu.");
-    }
-}
-
-// Helper for formatting numbers
-const fmtNum = (num) => new Intl.NumberFormat('en-US').format(num);
-
-// Turkish Public Holidays 2026 (Format: MM-DD)
-// Note: Religious holidays (Ramazan/Kurban) change every year.
-const TR_HOLIDAYS_2026 = [
-    "01-01", // Yılbaşı
-    "03-20", "03-21", "03-22", // Ramazan Bayramı (Approx)
-    "04-23", // Ulusal Egemenlik
-    "05-01", // Emek ve Dayanışma
-    "05-19", // Gençlik ve Spor
-    "05-27", "05-28", "05-29", "05-30", // Kurban Bayramı (Approx)
-    "07-15", // Demokrasi ve Milli Birlik
-    "08-30", // Zafer Bayramı
-    "10-29"  // Cumhuriyet Bayramı
-];
-
-function getTrTime() {
-    // Render servers are usually UTC. Turkey is UTC+3.
-    const now = new Date();
-    const trTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
-    return trTime;
-}
-
-// Logic state for reports
-let lastReportHour = -1;
-
-async function sendStatusReport(isTest = false, targetChatId = null, skipChannel = false) {
-    if (watchedStocks.length === 0) {
-        if (targetChatId) await bot.api.sendMessage(targetChatId, "Takip listeniz boş.");
-        return;
-    }
-
-    const trNow = getTrTime();
-    const timeStr = `${trNow.getUTCHours()}:${trNow.getUTCMinutes().toString().padStart(2, '0')}`;
-    const header = isTest ? `📊 TEST RAPORU (${timeStr})` : `📊 Bilgilendirme Mesajı (${timeStr})`;
-
-    let msg = `${header}\n\n`;
+    await ctx.reply(`🧪 Test Başlatılıyor (${watchedStocks.length} hisse)...`);
 
     for (const stock of watchedStocks) {
-        const cache = marketCache[stock];
-        if (cache && cache.lastLot > 0) {
-            // Check if lot count is below 70% of initial average (30% drop)
-            const isWeakening = cache.initialAvg > 0 && cache.lastLot < (cache.initialAvg * 0.70);
-            const status = isWeakening ? "⚠️ Lotlar Eriyor!" : "✅ Tavan Sağlam";
-            msg += `🔹 ${stock}: ${fmtNum(cache.lastLot)} Lot (${status})\n`;
+        await ctx.reply(`🔍 ${stock} kontrol ediliyor...`);
+
+        // Manual standard check cycle
+        const lot = await performStockCheck(stock, ctx); // Pass ctx for verbose logs to USER
+
+        if (lot !== null) {
+            await ctx.reply(`✅ ${stock} Başarılı! Okunan Lot: ${fmt(lot)}`);
         } else {
-            msg += `🔹 ${stock}: Veri henüz alınamadı. (Sıradaki kontrolde çekilecek)\n`;
-        }
-    }
-
-    if (!isTest) {
-        msg += `\n✅ Takip devam ediyor.`;
-    } else {
-        msg += `\n✅ Test başarılı.`;
-    }
-
-    const reportHours = [10, 12, 14, 16, 18];
-    const currentHour = trNow.getUTCHours();
-    const nextHour = reportHours.find(h => h > currentHour) || reportHours[0];
-    const nextDayStr = (nextHour <= currentHour) ? "yarın " : "";
-
-    msg += `\n🕒 Bir sonraki kontrol ${nextDayStr}${nextHour}:00'da yapılacaktır.`;
-
-    // Send to target or channel
-    if (targetChatId) {
-        try { await bot.api.sendMessage(targetChatId, msg); } catch (e) { }
-    }
-
-    // Send to channel ONLY IF skipChannel is false
-    if (!skipChannel && config.CHANNEL_ID && String(config.CHANNEL_ID) !== String(targetChatId)) {
-        try { await bot.api.sendMessage(config.CHANNEL_ID, msg); } catch (e) { }
-    }
-}
-
-// Commands
-bot.command("test", async (ctx) => {
-    console.log(`[COMMAND] RECEIVED /test on Instance ${INSTANCE_ID}`);
-
-    if (watchedStocks.length === 0) {
-        return ctx.reply("Takip listeniz boş.");
-    }
-
-    const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...\nLütfen bekleyin... Resim analizi yapılıyor.`);
-
-    for (let i = 0; i < watchedStocks.length; i++) {
-        const stock = watchedStocks[i];
-        console.log(`[COLOSSUS] Test start: ${stock}`);
-
-        await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ${stock}: Komut gönderiliyor...`);
-
-        // 1. Send Command
-        await auth.requestStockDerinlik(stock);
-
-        await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ${stock}: Fotoğraf bekleniyor...`);
-
-        // 2. Wait
-        const responseMsg = await auth.waitForBotResponse(20000);
-        if (!responseMsg) {
-            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ⚠️ ${stock}: Yanıt gelmedi (Timeout).`);
-            continue;
+            await ctx.reply(`❌ ${stock} Başarısız! (OCR/Timeout)`);
         }
 
-        await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ${stock}: OCR Okunuyor...`);
-
-        // 3. Download
-        const photoBuffer = await auth.downloadBotPhoto(responseMsg);
-
-        // 4. OCR
-        const data = await scraper.extractLotFromImage(photoBuffer, stock);
-
-        if (data && data.topBidLot > 0) {
-            marketCache[stock] = {
-                history: [data.topBidLot],
-                initialAvg: data.topBidLot,
-                lastLot: data.topBidLot
-            };
-            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length})\n✅ ${stock}: ${fmtNum(data.topBidLot)} Lot`);
-        } else {
-            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length})\n⚠️ ${stock}: OCR Okuyamadı.`);
-        }
-        await new Promise(r => setTimeout(r, 2000));
+        // Wait a bit
+        await delay(3000);
     }
-
-    await sendStatusReport(true, ctx.chat.id, true);
+    await ctx.reply("🏁 Test Tamamlandı.");
 });
 
-// Main Loop
-async function checkMarket() {
-    // 0. Check if Bot is Active
-    if (!isBotActive) return;
 
-    // 1. Check if already running
-    if (isCheckRunning) return;
+// --- MAIN LOOP ---
 
-    const trNow = getTrTime();
-    const hours = trNow.getUTCHours();
-    const minutes = trNow.getUTCMinutes();
-    const day = trNow.getUTCDay(); // 0=Sun, 6=Sat
-    const dateStr = `${(trNow.getUTCMonth() + 1).toString().padStart(2, '0')}-${trNow.getUTCDate().toString().padStart(2, '0')}`;
+async function mainLoop() {
+    if (!isBotActive || isCheckRunning) return;
 
-    const currentTimeVal = hours * 100 + minutes;
+    const now = new Date();
+    // Adjust to Turkey Time (UTC+3)
+    const trTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+    const hour = trTime.getUTCHours();
+    const minute = trTime.getUTCMinutes();
+    const day = trTime.getUTCDay(); // 0=Sun, 6=Sat
 
-    // Heartbeat
-    if (currentTimeVal % 5 === 0 && minutes !== lastHeartbeatMin) {
-        console.log(`[HEARTBEAT] Instance ${INSTANCE_ID} is alive. Time: ${trNow.toISOString()}, Stocks: ${watchedStocks.length}`);
-        lastHeartbeatMin = minutes;
-    }
-
-    // Weekend and Holiday Check
-    const isWeekend = (day === 0 || day === 6);
-    const isHoliday = TR_HOLIDAYS_2026.includes(dateStr);
-
-    if (isWeekend || isHoliday) {
-        if (minutes % 60 === 0 && hours === 10) console.log("Borsa kapalı (Haftasonu/Tatil).");
-        return;
-    }
-
-    // Report Scheduling (Every 2 hours: 10, 12, 14, 16, 18)
-    const reportHours = [10, 12, 14, 16, 18];
-    if (minutes === 0 && reportHours.includes(hours) && lastReportHour !== hours) {
-        console.log(`TR Saati: ${hours}:00 - Rapor gönderiliyor...`);
-        await sendStatusReport();
-        lastReportHour = hours;
-    }
-
-    // Market Hours Check (09:58 - 18:00)
-    if (currentTimeVal < 958 || currentTimeVal >= 1800) {
-        return;
-    }
+    // 1. Time Rules
+    // Market Hours: 10:00 - 18:00 (approx)
+    if (day === 0 || day === 6) return; // Weekend
+    if (hour < 9 || hour >= 18) return; // Night
 
     isCheckRunning = true;
 
     try {
-        console.log(`Starting checks for ${watchedStocks.length} stocks...`);
+        // 2. Reporting Schedule (10, 12, 14, 16, 18)
+        const reportHours = [10, 12, 14, 16, 18];
+        if (minute === 0 && reportHours.includes(hour) && lastReportHour !== hour) {
+            await sendGeneralReport(hour);
+            lastReportHour = hour;
+        }
+
+        // 3. Stock Checks
+        console.log(`[LOOP] Starting check cycle for ${watchedStocks.length} stocks.`);
 
         for (const stock of watchedStocks) {
-            // Check active state again
             if (!isBotActive) break;
 
-            console.log(`[MARKET CHECK] Checking ${stock}...`);
+            const currentLot = await performStockCheck(stock);
 
-            // 1. Send /derinlik command
-            const cmdSent = await auth.requestStockDerinlik(stock);
-            if (!cmdSent) {
-                console.error(`[ERROR] Fail to send command for ${stock}`);
-                continue;
+            if (currentLot !== null) {
+                // Update Cache
+                if (!stockData[stock]) {
+                    stockData[stock] = { initialLot: currentLot, lastLot: currentLot };
+                }
+
+                const data = stockData[stock];
+
+                // Alert Logic: Drop check
+                // If initialLot is 0/undefined, set it now
+                if (!data.initialLot) data.initialLot = currentLot;
+
+                // Check Threshold (e.g. 70%)
+                const threshold = data.initialLot * 0.7;
+                data.lastLot = currentLot;
+
+                if (currentLot < threshold) {
+                    // ALERT!
+                    const dropMsg = `⚠️ **TAVAN BOZMA RİSKİ!**\n\n` +
+                        `📉 Hisse: #${stock}\n` +
+                        `🔻 Mevcut Lot: ${fmt(currentLot)}\n` +
+                        `📊 Başlangıç: ${fmt(data.initialLot)}\n` +
+                        `⚠️ Kritik seviyenin altına indi!`;
+
+                    await broadcast(dropMsg);
+
+                    // Reset initial logic? Or keep alerting? 
+                    // To avoid spam, maybe update initialLot to current so we don't spam?
+                    // For now, valid alert.
+                }
             }
 
-            // 2. Wait for response
-            const responseMsg = await auth.waitForBotResponse(20000);
-            if (!responseMsg) {
-                console.log(`[WARN] No response for ${stock} (Timeout)`);
-                continue;
-            }
-
-            // 3. Download Photo
-            const photoBuffer = await auth.downloadBotPhoto(responseMsg);
-            if (!photoBuffer) {
-                console.error(`[ERROR] Failed to download photo for ${stock}`);
-                continue;
-            }
-
-            // 4. Run OCR
-            const data = await scraper.extractLotFromImage(photoBuffer, stock);
-
-            if (!data) {
-                console.log(`[WARN] OCR could not extract data for ${stock}`);
-                continue;
-            }
-
-            const currentLot = data.topBidLot;
-
-            // Initialize Cache
-            if (!marketCache[stock]) {
-                marketCache[stock] = {
-                    history: [],
-                    initialAvg: currentLot,
-                    lastLot: currentLot
-                };
-            }
-
-            const cache = marketCache[stock];
-            cache.history.push(currentLot);
-            if (cache.history.length > 50) cache.history.shift();
-
-            // ALERT LOGIC
-            let alertMsg = "";
-            let reason = "";
-            let dropRate = 0;
-
-            if (data.isCeiling) {
-                `📈 Hisse: ${stock}\n` +
-                    `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
-                    `📊 Başlangıç Eşiği: ${fmtNum(cache.initialAvg)}\n` +
-                    `📉 Düşüş Oranı: %${dropRate}\n` +
-                    `🔍 Sebep: ${reason}\n` +
-                    `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
-                    `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
-            }
+            // Wait between stocks to avoid spamming the target bot
+            await delay(15000);
         }
-    } else {
-        // Not at ceiling
-        // If it WAS at ceiling recently, maybe alert?
-        // For now, simple logging.
-        // console.log(`${stock} is not at ceiling.`);
+
+    } catch (e) {
+        console.error("[LOOP] Error:", e);
+    } finally {
+        isCheckRunning = false;
     }
-
-    // Send Alert
-    if (alertMsg) {
-        console.log(`ALERT for ${stock}: ${reason}`);
-        // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
-        // We need CHANNEL_ID in .env or config.
-        // For now sending to Saved Messages (me) or the channel if configured.
-        if (config.CHANNEL_ID) {
-            try {
-                await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
-            } catch (e) { console.error("Send error:", e.message); }
-        } else {
-            // Start user?
-        }
-    }
-
-    // Update Cache
-    cache.lastLot = currentLot;
-} // End of FOR loop
-
-                } catch (e) {
-    console.error("Loop Error:", e);
-} finally {
-    isCheckRunning = false;
 }
-            }
 
-// Scheduler: Run every 20 seconds
-setInterval(checkMarket, 20_000);
+// Single Stock Check
+async function performStockCheck(symbol, verboseCtx = null) {
+    // 1. Send Command
+    const sent = await auth.requestStockDerinlik(symbol);
+    if (!sent) {
+        if (verboseCtx) await verboseCtx.reply(`❌ ${symbol}: Komut gönderilemedi.`);
+        return null;
+    }
 
-// Heartbeat Log (Every 5 minutes)
-setInterval(() => {
-    console.log(`[HEARTBEAT] Bot is alive. Time: ${getTrTime().toISOString()}, Stocks: ${watchedStocks.length}`);
-}, 5 * 60 * 1000);
+    // 2. Wait Response
+    const msg = await auth.waitForBotResponse(25000);
+    if (!msg) {
+        if (verboseCtx) await verboseCtx.reply(`⚠️ ${symbol}: Yanıt gelmedi (Timeout).`);
+        return null;
+    }
 
-// Error handler for bot
-bot.catch((err) => {
-    console.error("❌ Bot error:", err);
-});
+    // 3. Download
+    const buffer = await auth.downloadBotPhoto(msg);
+    if (!buffer) {
+        if (verboseCtx) await verboseCtx.reply(`⚠️ ${symbol}: Fotoğraf indirilemedi.`);
+        return null;
+    }
 
-// Start
+    // 4. OCR
+    const result = await scraper.extractLotFromImage(buffer, symbol);
+    if (result && result.topBidLot) {
+        return result.topBidLot;
+    } else {
+        return null;
+    }
+}
+
+
+// --- HELPERS ---
+
+async function sendGeneralReport(hour) {
+    if (watchedStocks.length === 0) return;
+
+    let report = `📊 **Piyasa Durum Raporu (${hour}:00)**\n\n`;
+
+    for (const stock of watchedStocks) {
+        const data = stockData[stock];
+        if (data) {
+            const emoji = (data.lastLot < data.initialLot) ? '📉' : '✅';
+            report += `${emoji} #${stock}: ${fmt(data.lastLot)} Lot\n`;
+        } else {
+            report += `⏳ #${stock}: Veri yok\n`;
+        }
+    }
+
+    report += `\n🤖 Takip Devam Ediyor...`;
+    await broadcast(report);
+}
+
+async function broadcast(text) {
+    // 1. Send to Admin
+    if (process.env.ADMIN_ID) {
+        try { await bot.api.sendMessage(process.env.ADMIN_ID, text); } catch (e) { }
+    }
+    // 2. Send to Channel (if configured)
+    if (config.CHANNEL_ID) {
+        try { await bot.api.sendMessage(config.CHANNEL_ID, text); } catch (e) { }
+    }
+}
+
+async function syncStateToCloud(replyMsg) {
+    await auth.saveAppState({ stocks: watchedStocks, isBotActive });
+    // Note: We don't save 'stockData' fully to keep message short, 
+    // or we could save it if needed. For now, restarting resets 'initialLot' reference 
+    // which might be wanted (reset baseline on restart) or unwanted.
+    // If we want persistence of baselines, we should add stockData to cloud save.
+
+    // Let's add partial persistence for robustness
+    // await auth.saveAppState({ stocks: watchedStocks, isBotActive, data: stockData });
+}
+
+function fmt(num) {
+    return new Intl.NumberFormat('tr-TR').format(num);
+}
+
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+
+// --- INITIALIZATION ---
+
 (async () => {
-    console.log("Bot starting...");
+    console.log("🚀 System Starting...");
     await auth.startUserbot();
 
-    // Load State from Cloud (Telegram Saved Messages)
-    console.log("☁️ Loading state from cloud (V2)...");
-    const cloudState = await auth.loadAppState();
+    const state = await auth.loadAppState();
+    if (state.stocks) watchedStocks = state.stocks;
+    if (state.isBotActive !== undefined) isBotActive = state.isBotActive;
 
-    // Restore Stocks
-    if (cloudState.stocks && cloudState.stocks.length > 0) {
-        watchedStocks = cloudState.stocks;
-        console.log(`✅ Loaded ${watchedStocks.length} stocks from cloud.`);
-    }
+    console.log(`Loaded: ${watchedStocks.length} stocks. Active: ${isBotActive}`);
 
-    // Restore Active State
-    if (cloudState.isBotActive !== undefined) {
-        isBotActive = cloudState.isBotActive;
-        console.log(`✅ Restored Bot Mode: ${isBotActive ? 'ACTIVE' : 'PASSIVE'}`);
-    } else {
-        console.log("ℹ️ No active state found, defaulting to ACTIVE.");
-        isBotActive = true;
-    }
+    // Start Bot
+    bot.start({ onStart: (info) => console.log(`@${info.username} started!`) });
 
-    console.log("🤖 Starting Telegram Bot...");
-
-    // Retry logic for bot authentication (Hugging Face network can be flaky)
-    let retries = 3;
-    let authenticated = false;
-
-    while (retries > 0 && !authenticated) {
-        try {
-            const me = await bot.api.getMe();
-            console.log(`✅ Bot authenticated as @${me.username} (${me.first_name})`);
-            authenticated = true;
-        } catch (e) {
-            retries--;
-            console.error(`❌ Bot authentication failed (${3 - retries}/3): ${e.message}`);
-            if (retries > 0) {
-                console.log(`⏳ Retrying in 3 seconds...`);
-                await new Promise(r => setTimeout(r, 3000));
-            }
-        }
-    }
-
-    if (!authenticated) {
-        console.error("❌ CRITICAL: Could not authenticate bot after 3 attempts!");
-        console.error("Please check BOT_TOKEN in Hugging Face secrets.");
-    }
-
-    // 409 Conflict & Startup Logic
-    const startBotWithRetry = async (retryCount = 0) => {
-        const delays = [20000, 30000, 40000, 60000]; // Increased to 20s, 30s, 40s, 60s
-        const delay = delays[retryCount] || 60000;
-
-        console.log(`⏳ Waiting ${delay / 1000} seconds before starting bot (Instance conflict prevention - Attempt ${retryCount + 1})...`);
-        await new Promise(r => setTimeout(r, delay));
-
-        try {
-            // bot.start() is non-blocking in Grammy, but we wrap it carefully
-            await bot.start({
-                onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
-                drop_pending_updates: true
-            });
-        } catch (err) {
-            if (err.description?.includes("Conflict") || err.code === 409) {
-                console.warn(`⚠️ Bot conflict detected! (Attempt ${retryCount + 1}/5). Retrying in next cycle...`);
-                if (retryCount < 5) {
-                    return startBotWithRetry(retryCount + 1);
-                }
-            } else {
-                console.error("❌ Bot encountered an error during start:", err.message);
-                // Don't crash the whole process, try to wait and restart
-                setTimeout(() => startBotWithRetry(0), 10000);
-            }
-        }
-    };
-
-    await startBotWithRetry();
-
-    if (!isCheckRunning) {
-        console.log("🚀 Launching initial market check...");
-        checkMarket();
-    }
+    // Scheduler (Every 30s)
+    setInterval(mainLoop, 30000);
 })();

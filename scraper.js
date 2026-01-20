@@ -1,5 +1,4 @@
 const Tesseract = require('tesseract.js');
-const fs = require('fs');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
@@ -7,13 +6,13 @@ async function extractLotFromImage(imageBuffer, symbol) {
 
         // Recognize text from image buffer
         // using Turkish language for better accuracy with "Emir", "Adet", "Alış"
+        // Page Segmentation Mode 6 (Assume a single uniform block of text) helps with tables sometimes
         const result = await Tesseract.recognize(
             imageBuffer,
             'eng+tur',
             {
                 logger: m => {
-                    // Only log progress every 20-30% to avoid clutter
-                    if (m.status === 'recognizing text' && (Math.round(m.progress * 100) % 25 === 0)) {
+                    if (m.status === 'recognizing text' && (Math.round(m.progress * 100) % 50 === 0)) {
                         console.log(`[OCR] ${symbol} Progress: ${Math.round(m.progress * 100)}%`);
                     }
                 }
@@ -21,74 +20,72 @@ async function extractLotFromImage(imageBuffer, symbol) {
         );
 
         const text = result.data.text;
-        console.log(`[OCR] ${symbol} Raw Text Preview:\n${text.substring(0, 300)}...`);
+        // console.log(`[OCR] ${symbol} Text Preview:\n${text.substring(0, 200)}...`);
 
-        // PARSING LOGIC
-        // We are looking for the "Adet" column in the "Alış" section (Left side typically).
-        // Structure:
-        // Emir | Adet | Alış | Satış | Adet | Emir
-        // 4753 | 3.444.761 | 44.24 | ...
+        // PARSING LOGIC for "Derinlik" Table
+        // Structure typically: 
+        // Emir | Adet (Lot) | Alış ...
+        // 4753 | 3.444.761  | 44.24 ...
 
-        // We want the first number under "Adet" (or the largest on the left)
-        // Let's split by lines
+        // We look for the first valid data row.
+        // A valid row usually starts with a numeric "Emir" count, followed by a large "Lot" number.
+
         const lines = text.split('\n');
 
         for (const line of lines) {
-            // Clean line
             const clean = line.trim();
             if (!clean) continue;
 
-            // Regex to match the pattern: Number Space Number(with dots) Space Number(decimal)
-            // Example: 4753 3.444.761 44.24
-
-            // Heuristic: Look for lines that have 3 or more distinct numbers separated by space
-            // And the middle one is large (Lot)
-
-            // Remove dots/commas to simplify regex for structure check
-            // BUT keep them for extraction
-
-            // Try to identify the "data row" pattern
-            // A typical data row starts with an integer (Emir count)
-            // Followed by a large integer (Lot)
-            // Followed by a float (Price)
-
+            // Simple cleaning: 
+            // 1. Replace common OCR errors if needed (e.g. 'l' to '1') - Tesseract 5 is usually okay.
+            // 2. Split by whitespace.
             const parts = clean.split(/\s+/);
 
-            // We need at least 3 parts for the left side of the table
-            if (parts.length >= 3) {
-                // Check 1st part (Emir count): Integer
-                const p1 = parseInt(parts[0].replace(/\D/g, ''));
+            // We need at least 2 parts (Emir, Lot)
+            if (parts.length < 2) continue;
 
-                // Check 2nd part (Lot): Integer, likely large (has dots)
-                const p2Raw = parts[1];
-                const p2 = parseInt(p2Raw.replace(/\./g, '').replace(/,/g, ''));
+            // Part 1: Emir Count (Integer)
+            // Remove non-digits just in case
+            const p1Str = parts[0].replace(/\D/g, '');
+            const emirCount = parseInt(p1Str);
 
-                // Check 3rd part (Price): Float
-                const p3Raw = parts[2];
-                // Price usually has decimal point or comma
-                const p3 = parseFloat(p3Raw.replace(',', '.'));
+            // Part 2: Lot Count
+            // Might look like "3.444.761" or "3,444,761" or "3444761"
+            let p2Str = parts[1];
 
-                // VALIDATING THE DATA ROW
-                // 1. Emir count should be > 0
-                // 2. Lot should be > 100 (assume)
-                // 3. Price should be reasonable (e.g. > 0 and < 10000)
+            // If p2Str is short (like '...'), it might be noise, check p3?
+            // Usually Lot is the second column.
 
-                if (!isNaN(p1) && !isNaN(p2) && !isNaN(p3)) {
-                    if (p2 > 100 && p3 > 0 && p3 < 100000) {
-                        console.log(`[OCR] ${symbol} - MATCH FOUND: ${clean}`);
-                        console.log(`[OCR] ${symbol} - Extracted Lot: ${p2}`);
-                        return {
-                            symbol,
-                            topBidLot: p2,
-                            price: p3,
-                            isCeiling: true // Assume ceiling if we are asking for depth
-                        };
+            // Clean punctuation from Lot string to parse it as integer
+            // We assume Turkish locale often uses dots for thousands separators.
+            const lotClean = p2Str.replace(/[.,]/g, '');
+            const lotCount = parseInt(lotClean);
+
+            // VALIDATION
+            // 1. Emir count > 0
+            // 2. Lot count > 100 (Arbitrary low filter to avoid headers/noise)
+            // 3. (Optional) Check Part 3 for price if needed, but Lot is priority.
+
+            if (!isNaN(emirCount) && !isNaN(lotCount)) {
+                // Heuristic: Emir count usually smaller than Lot count in major stocks, but not always.
+                // Emir count usually not huge (e.g. < 1,000,000), Lot can be huge.
+
+                if (emirCount > 0 && lotCount > 0) {
+                    // Check if this looks like a header line "Emir Adet..."
+                    if (clean.toLowerCase().includes("emir") || clean.toLowerCase().includes("adet")) {
+                        continue;
                     }
+
+                    console.log(`[OCR] ${symbol} - Match Found: Emir=${emirCount}, Lot=${lotCount}`);
+                    return {
+                        symbol,
+                        topBidLot: lotCount
+                    };
                 }
             }
         }
 
-        console.log(`[OCR] ${symbol} - No valid data row found.`);
+        console.log(`[OCR] ${symbol} - No valid Lot data found.`);
         return null;
 
     } catch (e) {

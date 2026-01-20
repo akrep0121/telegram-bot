@@ -1,6 +1,6 @@
 const { TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
-const input = require("input"); // npm install input
+const input = require("input");
 const fs = require("fs");
 const config = require("./config");
 const { Api } = require("telegram/tl");
@@ -12,221 +12,143 @@ let sessionString = process.env.SESSION_STRING || "";
 if (!sessionString && fs.existsSync(SESSION_FILE)) {
     sessionString = fs.readFileSync(SESSION_FILE, "utf8");
 }
-
-// FIX: Trim whitespace issues from copy-paste
 sessionString = sessionString.trim();
-
-if (sessionString) {
-    console.log(`[DEBUG] Session String loaded. Length: ${sessionString.length}`);
-} else {
-    console.log("[DEBUG] No Session String found. Will attempt interactive login.");
-}
 
 const client = new TelegramClient(
     new StringSession(sessionString),
     config.API_ID,
     config.API_HASH,
-    {
-        connectionRetries: 5,
-    }
+    { connectionRetries: 5 }
 );
 
 async function startUserbot() {
-    console.log("Starting Userbot...");
-
-    // Custom Logger to detect if it's asking for input (which means session failed)
-    const phoneCallback = async () => {
-        console.error("❌ CRITICAL ERROR: Session Invalid! Bot is asking for phone number.");
-        console.error("The SESSION_STRING on Hugging Face is likely invalid or expired.");
-        throw new Error("Interactive login not supported in Cloud mode. Please regenerate SESSION_STRING.");
-    };
-
-    await client.start({
-        phoneNumber: phoneCallback,
-        password: async () => await input.text("İki faktörlü doğrulama şifreniz (varsa): "),
-        phoneCode: async () => await input.text("Telegram'a gelen kodu girin: "),
-        onError: (err) => console.log(err),
-    });
-
-    console.log("Userbot Connected!");
-
-    // Save session (only if locally running and interactive)
-    const newSessionCursor = client.session.save();
-    if (newSessionCursor && newSessionCursor !== sessionString) {
-        fs.writeFileSync(SESSION_FILE, newSessionCursor);
+    if (client.connected) return;
+    try {
+        await client.start({
+            phoneNumber: async () => await input.text("Telefon numaranız: "),
+            password: async () => await input.text("2FA Şifreniz: "),
+            phoneCode: async () => await input.text("Telegram Kodu: "),
+            onError: (err) => console.log(err),
+        });
+        console.log("[USERBOT] Connected!");
+        const newSession = client.session.save();
+        if (newSession && newSession !== sessionString) {
+            fs.writeFileSync(SESSION_FILE, newSession);
+        }
+    } catch (e) {
+        console.error("[USERBOT] Connection failed:", e);
     }
 }
 
-async function sendStartToBot() {
-    if (!client.connected) {
-        await startUserbot();
-    }
+// ------ SYSTEM V2 ACTIONS ------
 
+// 1. Send Command: /derinlik [SYMBOL]
+async function requestStockDerinlik(symbol) {
+    if (!client.connected) await startUserbot();
     try {
-        console.log(`[AUTH] Sending /start to ${config.TARGET_BOT_USERNAME}...`);
-        await client.sendMessage(config.TARGET_BOT_USERNAME, { message: '/start' });
-        console.log(`[AUTH] /start sent successfully!`);
-        // Wait for bot to process
-        await new Promise(r => setTimeout(r, 2000));
+        console.log(`[USERBOT] Sending '/derinlik ${symbol}' to ${config.TARGET_BOT_USERNAME}...`);
+        await client.sendMessage(config.TARGET_BOT_USERNAME, { message: `/derinlik ${symbol}` });
         return true;
-    } catch (error) {
-        console.error("[AUTH] Error sending /start:", error.message);
+    } catch (e) {
+        console.error(`[userbot] Failed to send command for ${symbol}:`, e.message);
         return false;
     }
 }
 
-async function getFreshWebAppUrl() {
-    if (!client.connected) {
-        await startUserbot();
-    }
+// 2. Wait for Response (Image)
+async function waitForBotResponse(timeoutMs = 25000) {
+    if (!client.connected) await startUserbot();
 
-    // OCR Interaction Functions
+    return new Promise((resolve) => {
+        let resolved = false;
 
-    async function requestStockDerinlik(symbol) {
-        if (!client.connected) await startUserbot();
-        try {
-            console.log(`[AUTH] Sending /derinlik ${symbol} to ${config.TARGET_BOT_USERNAME}...`);
-            await client.sendMessage(config.TARGET_BOT_USERNAME, { message: `/derinlik ${symbol}` });
-            return true;
-        } catch (e) {
-            console.error(`[AUTH] Failed to send command for ${symbol}:`, e.message);
-            return false;
-        }
-    }
-    // We use the Userbot's "Saved Messages" (peer: "me") to store the database.
-    // This prevents cluttering the public channel.
+        const handler = (event) => {
+            if (resolved) return;
+            const msg = event.message;
 
-    async function saveAppState(state) {
-        if (!client.connected) await startUserbot();
-        try {
-            // state = { stocks: [], isBotActive: true/false }
-            const jsonStr = JSON.stringify(state);
-            const dbTag = "#DATABASE_V2"; // Version bump
-            const messageText = `${dbTag}\n${jsonStr}\n\nDO NOT DELETE THIS MESSAGE (Bot Memory V2)`;
+            // Check sender
+            // Note: peerId might be an object or int depending on library version/context
+            // We'll simplistic check: if it has media photo.
+            // Ideally check msg.peerId.userId matches target bot ID.
 
-            // Search for existing DB message in Saved Messages
-            const history = await client.getMessages("me", { search: dbTag, limit: 1 });
-
-            if (history && history.length > 0) {
-                await client.editMessage("me", { message: history[0].id, text: messageText });
-                console.log("Database V2 updated in Saved Messages.");
-            } else {
-                await client.sendMessage("me", { message: messageText });
-                console.log("New Database V2 created in Saved Messages.");
+            if (msg && msg.media && msg.media.className === "MessageMediaPhoto") {
+                resolved = true;
+                client.removeEventHandler(handler, new Api.NewMessage({}));
+                resolve(msg);
             }
-        } catch (e) {
-            console.error("Cloud Save Error:", e);
-        }
-    }
+        };
 
-    async function loadAppState() {
-        if (!client.connected) await startUserbot();
-        try {
-            const dbTag = "#DATABASE_V2";
-            const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+        // Listen only for incoming messages from the target bot
+        client.addEventHandler(handler, new Api.NewMessage({
+            incoming: true,
+            fromUsers: [config.TARGET_BOT_USERNAME]
+        }));
 
-            if (history && history.length > 0) {
-                const lines = history[0].message.split('\n');
-                const jsonStr = lines[1];
-                const state = JSON.parse(jsonStr);
-                console.log(`Loaded Cloud DB V2: ${state.stocks.length} stocks, Active: ${state.isBotActive}`);
-                return state;
-            } else {
-                // Try loading V1 (Legacy migration)
-                const v1 = await loadWatchedStocksV1();
-                if (v1.length > 0) {
-                    console.log("Migrating V1 DB to V2...");
-                    return { stocks: v1, isBotActive: true };
-                }
+        // Timeout
+        setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                client.removeEventHandler(handler, new Api.NewMessage({}));
+                console.log("[USERBOT] Timeout waiting for response.");
+                resolve(null);
             }
-            return { stocks: [], isBotActive: true };
-        } catch (e) {
-            console.error("Cloud Load Error:", e);
-            return { stocks: [], isBotActive: true };
+        }, timeoutMs);
+    });
+}
+
+// 3. Download Photo
+async function downloadBotPhoto(message) {
+    if (!client.connected) await startUserbot();
+    try {
+        console.log("[USERBOT] Downloading photo...");
+        const buffer = await client.downloadMedia(message, {});
+        return buffer;
+    } catch (e) {
+        console.error("[USERBOT] Download failed:", e.message);
+        return null;
+    }
+}
+
+// Helper: Cloud Persistence (Saved Messages)
+async function saveAppState(state) {
+    if (!client.connected) await startUserbot();
+    try {
+        const dbTag = "#SYSTEM_V3_DB";
+        const body = JSON.stringify(state);
+        const text = `${dbTag}\n${body}\n\nDO NOT DELETE - BOT MEMORY`;
+
+        const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+        if (history && history.length > 0) {
+            await client.editMessage("me", { message: history[0].id, text: text });
+        } else {
+            await client.sendMessage("me", { message: text });
         }
+        // console.log("[CLOUD] State saved.");
+    } catch (e) {
+        console.error("[CLOUD] Save failed:", e.message);
     }
+}
 
-    // Legacy V1 loader
-    async function loadWatchedStocksV1() {
-        try {
-            const dbTag = "#DATABASE_V1";
-            const history = await client.getMessages("me", { search: dbTag, limit: 1 });
-            if (history && history.length > 0) {
-                const lines = history[0].message.split('\n');
-                return JSON.parse(lines[1]);
-            }
-            return [];
-        } catch (e) { return []; }
-    }
-
-    // OCR Interaction Functions
-
-    async function requestStockDerinlik(symbol) {
-        if (!client.connected) await startUserbot();
-        try {
-            console.log(`[AUTH] Sending /derinlik ${symbol} to ${config.TARGET_BOT_USERNAME}...`);
-            await client.sendMessage(config.TARGET_BOT_USERNAME, { message: `/derinlik ${symbol}` });
-            return true;
-        } catch (e) {
-            console.error(`[AUTH] Failed to send command for ${symbol}:`, e.message);
-            return false;
+async function loadAppState() {
+    if (!client.connected) await startUserbot();
+    try {
+        const dbTag = "#SYSTEM_V3_DB";
+        const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+        if (history && history.length > 0) {
+            const lines = history[0].message.split('\n');
+            return JSON.parse(lines[1]);
         }
+    } catch (e) {
+        console.error("[CLOUD] Load failed (or empty):", e.message);
     }
+    return { stocks: [], isBotActive: true };
+}
 
-    async function waitForBotResponse(timeoutMs = 15000) {
-        return new Promise((resolve) => {
-            let resolved = false;
-
-            // Listener for new messages
-            const handler = async (event) => {
-                if (resolved) return;
-                const message = event.message;
-
-                // Check if it's from the target bot
-                if (message.peerId.userId && message.peerId.userId.toString() === "5753066495") { // xFinansBeta_bot ID? Need to verify or use username check
-                    // For safety we verify username if possible, or assume it's the bot we just texted
-                    // Simplification: Check if it has media (photo)
-                    if (message.media && message.media.className === "MessageMediaPhoto") {
-                        resolved = true;
-                        client.removeEventHandler(handler, new Api.NewMessage({}));
-                        resolve(message);
-                    }
-                }
-            };
-
-            // Add filter to only listen to target bot if possible, 
-            // gram.js event filtering is powerful but let's do manual check in handler for simplicity/robustness
-            client.addEventHandler(handler, new Api.NewMessage({ incoming: true, fromUsers: [config.TARGET_BOT_USERNAME] }));
-
-            // Timeout
-            setTimeout(() => {
-                if (!resolved) {
-                    resolved = true;
-                    client.removeEventHandler(handler, new Api.NewMessage({}));
-                    console.log("[AUTH] Timeout waiting for bot response.");
-                    resolve(null);
-                }
-            }, timeoutMs);
-        });
-    }
-
-    async function downloadBotPhoto(message) {
-        try {
-            console.log("[AUTH] Downloading photo...");
-            const buffer = await client.downloadMedia(message, {});
-            return buffer;
-        } catch (e) {
-            console.error("[AUTH] Download failed:", e.message);
-            return null;
-        }
-    }
-
-    module.exports = {
-        startUserbot,
-        saveAppState,
-        loadAppState,
-        sendStartToBot,
-        requestStockDerinlik,
-        waitForBotResponse,
-        downloadBotPhoto
-    };
+module.exports = {
+    startUserbot,
+    requestStockDerinlik,
+    waitForBotResponse,
+    downloadBotPhoto,
+    saveAppState,
+    loadAppState
+};
