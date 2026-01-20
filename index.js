@@ -291,17 +291,9 @@ async function checkMarket() {
     try {
         console.log(`Starting checks for ${watchedStocks.length} stocks...`);
 
-        // Get Fresh Auth URL (Once per cycle, or per stock? URL is valid for 10 mins)
-        // We can reuse it for all stocks in this burst.
-        // const url = await auth.getFreshWebAppUrl(); // This line is removed as it's not needed for OCR flow
-
-        // if (!url) {
-        //     console.error("Failed to generate Web App URL.");
-        //     isCheckRunning = false;
-        //     return;
-        // }
-
         for (const stock of watchedStocks) {
+            // Double check active state inside loop in case user paused mid-loop
+            if (!isBotActive) break;
             // Double check active state inside loop in case user paused mid-loop
             if (!isBotActive) break;
 
@@ -401,33 +393,72 @@ async function checkMarket() {
                     `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
             }
         }
-    } else {
-        // Not at ceiling
-        // If it WAS at ceiling recently, maybe alert?
-        // For now, simple logging.
-        // console.log(`${stock} is not at ceiling.`);
-    }
+        let reason = "";
+        let dropRate = 0;
 
-    // Send Alert
-    if (alertMsg) {
-        console.log(`ALERT for ${stock}: ${reason}`);
-        // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
-        // We need CHANNEL_ID in .env or config.
-        // For now sending to Saved Messages (me) or the channel if configured.
-        if (config.CHANNEL_ID) {
-            try {
-                await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
-            } catch (e) { console.error("Send error:", e.message); }
+        if (data.isCeiling) {
+            // Condition 1: 20% drop from previous
+            if (cache.lastLot > 0) {
+                const drop = (cache.lastLot - currentLot) / cache.lastLot;
+                if (drop >= 0.20) {
+                    dropRate = (drop * 100).toFixed(1);
+                    reason = `Ani düşüş! %${dropRate} (Önceki: ${fmtNum(cache.lastLot)})`;
+
+                    alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                        `📈 Hisse: ${stock}\n` +
+                        `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
+                        `📊 Önceki Lot: ${fmtNum(cache.lastLot)}\n` +
+                        `📉 Düşüş Oranı: %${dropRate}\n` +
+                        `🔍 Sebep: ${reason}\n` +
+                        `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
+                        `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
+                }
+            }
+
+            // Condition 2: 50% drop from initial 10-check average
+            if (!alertMsg && cache.initialAvg > 0) { // If not already alerted
+                if (currentLot < (cache.initialAvg * 0.50)) {
+                    const drop = (cache.initialAvg - currentLot) / cache.initialAvg;
+                    dropRate = (drop * 100).toFixed(1);
+                    reason = `Başlangıç eşiği (${fmtNum(cache.initialAvg)}) aşıldı! %${dropRate} düşüş`;
+
+                    alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                        `📈 Hisse: ${stock}\n` +
+                        `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
+                        `📊 Başlangıç Eşiği: ${fmtNum(cache.initialAvg)}\n` +
+                        `📉 Düşüş Oranı: %${dropRate}\n` +
+                        `🔍 Sebep: ${reason}\n` +
+                        `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
+                        `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
+                }
+            }
         } else {
-            // Start user?
+            // Not at ceiling
+            // If it WAS at ceiling recently, maybe alert?
+            // For now, simple logging.
+            // console.log(`${stock} is not at ceiling.`);
         }
+
+        // Send Alert
+        if (alertMsg) {
+            console.log(`ALERT for ${stock}: ${reason}`);
+            // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
+            // We need CHANNEL_ID in .env or config.
+            // For now sending to Saved Messages (me) or the channel if configured.
+            if (config.CHANNEL_ID) {
+                try {
+                    await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
+                } catch (e) { console.error("Send error:", e.message); }
+            } else {
+                // Start user?
+            }
+        }
+
+        // Update Cache
+        cache.lastLot = currentLot;
     }
 
-    // Update Cache
-    cache.lastLot = currentLot;
-}
-
-    } catch (e) {
+} catch (e) {
     console.error("Loop Error:", e);
 } finally {
     isCheckRunning = false;
