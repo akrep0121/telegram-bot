@@ -8,6 +8,7 @@
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "telegram": "^2.26.22",
+    "tesseract.js": "^7.0.0",
     "ws": "^8.19.0"
   }
 }

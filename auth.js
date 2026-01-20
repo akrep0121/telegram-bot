@@ -171,10 +171,75 @@ async function loadWatchedStocksV1() {
     } catch (e) { return []; }
 }
 
+// OCR Interaction Functions
+
+async function requestStockDerinlik(symbol) {
+    if (!client.connected) await startUserbot();
+    try {
+        console.log(`[AUTH] Sending /derinlik ${symbol} to ${config.TARGET_BOT_USERNAME}...`);
+        await client.sendMessage(config.TARGET_BOT_USERNAME, { message: `/derinlik ${symbol}` });
+        return true;
+    } catch (e) {
+        console.error(`[AUTH] Failed to send command for ${symbol}:`, e.message);
+        return false;
+    }
+}
+
+async function waitForBotResponse(timeoutMs = 15000) {
+    return new Promise((resolve) => {
+        let resolved = false;
+
+        // Listener for new messages
+        const handler = async (event) => {
+            if (resolved) return;
+            const message = event.message;
+
+            // Check if it's from the target bot
+            if (message.peerId.userId && message.peerId.userId.toString() === "5753066495") { // xFinansBeta_bot ID? Need to verify or use username check
+                // For safety we verify username if possible, or assume it's the bot we just texted
+                // Simplification: Check if it has media (photo)
+                if (message.media && message.media.className === "MessageMediaPhoto") {
+                    resolved = true;
+                    client.removeEventHandler(handler, new Api.NewMessage({}));
+                    resolve(message);
+                }
+            }
+        };
+
+        // Add filter to only listen to target bot if possible, 
+        // gram.js event filtering is powerful but let's do manual check in handler for simplicity/robustness
+        client.addEventHandler(handler, new Api.NewMessage({ incoming: true, fromUsers: [config.TARGET_BOT_USERNAME] }));
+
+        // Timeout
+        setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                client.removeEventHandler(handler, new Api.NewMessage({}));
+                console.log("[AUTH] Timeout waiting for bot response.");
+                resolve(null);
+            }
+        }, timeoutMs);
+    });
+}
+
+async function downloadBotPhoto(message) {
+    try {
+        console.log("[AUTH] Downloading photo...");
+        const buffer = await client.downloadMedia(message, {});
+        return buffer;
+    } catch (e) {
+        console.error("[AUTH] Download failed:", e.message);
+        return null;
+    }
+}
+
 module.exports = {
     startUserbot,
     getFreshWebAppUrl,
     saveAppState,
     loadAppState,
-    sendStartToBot
+    sendStartToBot,
+    requestStockDerinlik,
+    waitForBotResponse,
+    downloadBotPhoto
 };
