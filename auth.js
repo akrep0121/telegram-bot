@@ -1,9 +1,10 @@
 const { TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
+const { NewMessage } = require("telegram/events");
 const input = require("input");
 const fs = require("fs");
 const config = require("./config");
-const { Api } = require("telegram/tl");
+// const { Api } = require("telegram/tl"); // Unused if we use NewMessage event
 
 // Save session string to avoid re-login
 const SESSION_FILE = "session_string.txt";
