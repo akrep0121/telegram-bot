@@ -22,28 +22,35 @@ async function extractLotFromImage(imageBuffer, symbol) {
         );
 
         const text = result.data.text;
-
-        // PARSING LOGIC for "Derinlik" Table
-        // Goals: 
-        // 1. Handle fragmented numbers (e.g. "3 . 444" -> "3444").
-        // 2. Identify correct columns (Emir | Lot | Price).
-
         const lines = text.split('\n');
+        let tableStarted = false;
 
         for (const line of lines) {
             const clean = line.trim();
-            if (!clean || clean.length < 5) continue; // Skip noise
+            if (!clean || clean.length < 5) continue;
 
-            // Skip headers explicitly
-            if (/[a-zA-Z]/.test(clean)) {
-                // Any letters? Check if it's the header line
-                if (clean.includes("Emir") || clean.includes("Adet")) continue;
+            // CHECK FOR TABLE HEADER
+            // The table header line usually contains "Emir" and "Adet"
+            if (!tableStarted) {
+                // If we see "Emir" and "Adet", we assume the NEXT lines are the data.
+                // We use a loose check because OCR might see "Emir" as "Enir" etc. if not perfect,
+                // but our whitelist ensures we mostly get these chars.
+                const lower = clean.toLowerCase();
+                if (lower.includes('emir') || lower.includes('adet')) {
+                    console.log(`[OCR] ${symbol} - Table header found. Parsing subsequent lines...`);
+                    tableStarted = true;
+                }
+                // Skip everything before the table header (including the top info row with total volume)
+                continue;
             }
+
+            // --- DATA PARSING --- 
+            // We are now inside the table.
 
             // STRATEGY: 
             // 1. Split by spaces.
-            // 2. Merge fragmented number parts (e.g. "3" "." "444").
-            // 3. Extract the 3 main numeric columns.
+            // 2. Merge fragmented number parts.
+            // 3. Extract columns.
 
             const parts = clean.split(/\s+/);
             const mergedParts = [];
@@ -53,28 +60,17 @@ async function extractLotFromImage(imageBuffer, symbol) {
             for (let i = 0; i < parts.length; i++) {
                 const part = parts[i];
 
-                // If part is just a separator or part of a number, append to current
-                // Heuristic: If part is digits, check if we should merge with previous?
-                // Actually, simplest is to merge everything that looks like it belongs to one number.
-
                 if (currentNum === "") {
                     currentNum = part;
                 } else {
-                    // Check if we should append `part` to `currentNum`
-                    // Connect if:
-                    // - currentNum ends with . or ,
-                    // - part starts with . or ,
-                    // - part is exactly 3 digits (thousands block) and currentNum is digits
-
                     const endsWithSep = /[.,]$/.test(currentNum);
                     const startsWithSep = /^[.,]/.test(part);
-                    const isBlock = /^\d{3}$/.test(part); // e.g. "444"
+                    const isBlock = /^\d{3}$/.test(part);
                     const isNum = /^\d+$/.test(currentNum);
 
                     if (endsWithSep || startsWithSep || (isNum && isBlock)) {
-                        currentNum += part; // Merge
+                        currentNum += part;
                     } else {
-                        // Push current and start new
                         mergedParts.push(currentNum);
                         currentNum = part;
                     }
@@ -82,30 +78,22 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
             if (currentNum) mergedParts.push(currentNum);
 
-            // Now we have mergedParts, e.g. ["4753", "3.444.761", "44.24"]
-
-            // Filter non-numeric noise (keep only things with digits)
+            // Filter non-numeric noise
             const numericParts = mergedParts.filter(p => /\d/.test(p));
 
             if (numericParts.length >= 2) {
-                // Col 0: Emir
-                // Col 1: Lot (Target)
-                // Col 2: Price (Optional)
+                // Col 0: Emir (Small integer)
+                // Col 1: Lot (Large integer)
 
-                const rawEmir = numericParts[0].replace(/\D/g, ''); // 4753
-                const rawLot = numericParts[1].replace(/[.,]/g, ''); // 3444761
+                const rawEmir = numericParts[0].replace(/\D/g, '');
+                const rawLot = numericParts[1].replace(/[.,]/g, '');
 
                 const emirCount = parseInt(rawEmir);
                 const lotCount = parseInt(rawLot);
 
                 // Validation
-                // Lot must be significant > 100
-                // Emir > 0
                 if (!isNaN(emirCount) && !isNaN(lotCount) && lotCount > 100) {
-                    // Found a candidate row. 
-                    // Usually the first valid row is the "Top Bid" (ceiling).
-
-                    console.log(`[OCR] ${symbol} - Match: Emir=${emirCount}, Lot=${lotCount} (Raw: ${numericParts[1]})`);
+                    console.log(`[OCR] ${symbol} - Match: Emir=${emirCount}, Lot=${lotCount}`);
                     return {
                         symbol,
                         topBidLot: lotCount
@@ -115,7 +103,7 @@ async function extractLotFromImage(imageBuffer, symbol) {
         }
 
         console.log(`[OCR] ${symbol} - No valid Lot data found in text.`);
-        return null; // Return null if truly failed, loops will skip or retry
+        return null;
 
     } catch (e) {
         console.error(`[OCR] Error processing image for ${symbol}:`, e.message);
