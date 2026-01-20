@@ -244,11 +244,9 @@ bot.command("test", async (ctx) => {
 // Main Loop
 async function checkMarket() {
     // 0. Check if Bot is Active
-    if (!isBotActive) {
-        // console.log("[SYSTEM] Bot is PASSIVE. Skipping check.");
-        return;
-    }
+    if (!isBotActive) return;
 
+    // 1. Check if already running
     if (isCheckRunning) return;
 
     const trNow = getTrTime();
@@ -258,6 +256,8 @@ async function checkMarket() {
     const dateStr = `${(trNow.getUTCMonth() + 1).toString().padStart(2, '0')}-${trNow.getUTCDate().toString().padStart(2, '0')}`;
 
     const currentTimeVal = hours * 100 + minutes;
+
+    // Heartbeat
     if (currentTimeVal % 5 === 0 && minutes !== lastHeartbeatMin) {
         console.log(`[HEARTBEAT] Instance ${INSTANCE_ID} is alive. Time: ${trNow.toISOString()}, Stocks: ${watchedStocks.length}`);
         lastHeartbeatMin = minutes;
@@ -268,7 +268,6 @@ async function checkMarket() {
     const isHoliday = TR_HOLIDAYS_2026.includes(dateStr);
 
     if (isWeekend || isHoliday) {
-        // Express server above handle keep-alive, we just skip market logic
         if (minutes % 60 === 0 && hours === 10) console.log("Borsa kapalı (Haftasonu/Tatil).");
         return;
     }
@@ -292,9 +291,7 @@ async function checkMarket() {
         console.log(`Starting checks for ${watchedStocks.length} stocks...`);
 
         for (const stock of watchedStocks) {
-            // Double check active state inside loop in case user paused mid-loop
-            if (!isBotActive) break;
-            // Double check active state inside loop in case user paused mid-loop
+            // Check active state again
             if (!isBotActive) break;
 
             console.log(`[MARKET CHECK] Checking ${stock}...`);
@@ -306,8 +303,8 @@ async function checkMarket() {
                 continue;
             }
 
-            // 2. Wait for response (Photo)
-            const responseMsg = await auth.waitForBotResponse(20000); // 20s timeout
+            // 2. Wait for response
+            const responseMsg = await auth.waitForBotResponse(20000);
             if (!responseMsg) {
                 console.log(`[WARN] No response for ${stock} (Timeout)`);
                 continue;
@@ -334,7 +331,7 @@ async function checkMarket() {
             if (!marketCache[stock]) {
                 marketCache[stock] = {
                     history: [],
-                    initialAvg: currentLot, // First read is the reference
+                    initialAvg: currentLot,
                     lastLot: currentLot
                 };
             }
@@ -342,209 +339,150 @@ async function checkMarket() {
             const cache = marketCache[stock];
             cache.history.push(currentLot);
             if (cache.history.length > 50) cache.history.shift();
-            // Update History (For initial 10 checks)
 
-            // ALERT CONDITIONS
-            // Only alert if we are functionally at ceiling (isCeiling=true)
-            // Or maybe the user wants to know if the lot count drops even if not technically at ceiling?
-            // "tavandaki lot sayısı" implies we assume it IS at ceiling.
-            // But if it breaks ceiling (price drops), data.isCeiling will be false.
-            // If data.isCeiling became false, that ITSELF is a "Tavan bozdu" event.
-
+            // ALERT LOGIC
             let alertMsg = "";
             let reason = "";
             let dropRate = 0;
 
             if (data.isCeiling) {
-                // Condition 1: 20% drop from previous
-                if (cache.lastLot > 0) {
-                    const drop = (cache.lastLot - currentLot) / cache.lastLot;
-                    if (drop >= 0.20) {
-                        dropRate = (drop * 100).toFixed(1);
-                        reason = `Ani düşüş! %${dropRate} (Önceki: ${fmtNum(cache.lastLot)})`;
+                `📈 Hisse: ${stock}\n` +
+                    `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
+                    `📊 Başlangıç Eşiği: ${fmtNum(cache.initialAvg)}\n` +
+                    `📉 Düşüş Oranı: %${dropRate}\n` +
+                    `🔍 Sebep: ${reason}\n` +
+                    `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
+                    `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
+            }
+        }
+    } else {
+        // Not at ceiling
+        // If it WAS at ceiling recently, maybe alert?
+        // For now, simple logging.
+        // console.log(`${stock} is not at ceiling.`);
+    }
 
-                        alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                            `📈 Hisse: ${stock}\n` +
-                            `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
-                            `📊 Önceki Lot: ${fmtNum(cache.lastLot)}\n` +
-                            `📉 Düşüş Oranı: %${dropRate}\n` +
-                            `🔍 Sebep: ${reason}\n` +
-                            `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
-                            `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
-                    }
-                }
+    // Send Alert
+    if (alertMsg) {
+        console.log(`ALERT for ${stock}: ${reason}`);
+        // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
+        // We need CHANNEL_ID in .env or config.
+        // For now sending to Saved Messages (me) or the channel if configured.
+        if (config.CHANNEL_ID) {
+            try {
+                await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
+            } catch (e) { console.error("Send error:", e.message); }
+        } else {
+            // Start user?
+        }
+    }
 
-                // Condition 2: 50% drop from initial 10-check average
-                if (!alertMsg && cache.initialAvg > 0) { // If not already alerted
-                    if (currentLot < (cache.initialAvg * 0.50)) {
-                        const drop = (cache.initialAvg - currentLot) / cache.initialAvg;
-                        let reason = "";
-                        let dropRate = 0;
-
-                        if (data.isCeiling) {
-                            // Condition 1: 20% drop from previous
-                            if (cache.lastLot > 0) {
-                                const drop = (cache.lastLot - currentLot) / cache.lastLot;
-                                if (drop >= 0.20) {
-                                    dropRate = (drop * 100).toFixed(1);
-                                    reason = `Ani düşüş! %${dropRate} (Önceki: ${fmtNum(cache.lastLot)})`;
-
-                                    alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                                        `📈 Hisse: ${stock}\n` +
-                                        `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
-                                        `📊 Önceki Lot: ${fmtNum(cache.lastLot)}\n` +
-                                        `📉 Düşüş Oranı: %${dropRate}\n` +
-                                        `🔍 Sebep: ${reason}\n` +
-                                        `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
-                                        `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
-                                }
-                            }
-
-                            // Condition 2: 50% drop from initial 10-check average
-                            if (!alertMsg && cache.initialAvg > 0) { // If not already alerted
-                                if (currentLot < (cache.initialAvg * 0.50)) {
-                                    const drop = (cache.initialAvg - currentLot) / cache.initialAvg;
-                                    dropRate = (drop * 100).toFixed(1);
-                                    reason = `Başlangıç eşiği (${fmtNum(cache.initialAvg)}) aşıldı! %${dropRate} düşüş`;
-
-                                    alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                                        `📈 Hisse: ${stock}\n` +
-                                        `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
-                                        `📊 Başlangıç Eşiği: ${fmtNum(cache.initialAvg)}\n` +
-                                        `📉 Düşüş Oranı: %${dropRate}\n` +
-                                        `🔍 Sebep: ${reason}\n` +
-                                        `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
-                                        `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
-                                }
-                            }
-                        } else {
-                            // Not at ceiling
-                            // If it WAS at ceiling recently, maybe alert?
-                            // For now, simple logging.
-                            // console.log(`${stock} is not at ceiling.`);
-                        }
-
-                        // Send Alert
-                        if (alertMsg) {
-                            console.log(`ALERT for ${stock}: ${reason}`);
-                            // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
-                            // We need CHANNEL_ID in .env or config.
-                            // For now sending to Saved Messages (me) or the channel if configured.
-                            if (config.CHANNEL_ID) {
-                                try {
-                                    await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
-                                } catch (e) { console.error("Send error:", e.message); }
-                            } else {
-                                // Start user?
-                            }
-                        }
-
-                        // Update Cache
-                        cache.lastLot = currentLot;
-                    } // End of FOR loop
+    // Update Cache
+    cache.lastLot = currentLot;
+} // End of FOR loop
 
                 } catch (e) {
-                    console.error("Loop Error:", e);
-                } finally {
-                    isCheckRunning = false;
-                }
+    console.error("Loop Error:", e);
+} finally {
+    isCheckRunning = false;
+}
             }
 
-            // Scheduler: Run every 20 seconds
-            setInterval(checkMarket, 20_000);
+// Scheduler: Run every 20 seconds
+setInterval(checkMarket, 20_000);
 
-            // Heartbeat Log (Every 5 minutes)
-            setInterval(() => {
-                console.log(`[HEARTBEAT] Bot is alive. Time: ${getTrTime().toISOString()}, Stocks: ${watchedStocks.length}`);
-            }, 5 * 60 * 1000);
+// Heartbeat Log (Every 5 minutes)
+setInterval(() => {
+    console.log(`[HEARTBEAT] Bot is alive. Time: ${getTrTime().toISOString()}, Stocks: ${watchedStocks.length}`);
+}, 5 * 60 * 1000);
 
-            // Error handler for bot
-            bot.catch((err) => {
-                console.error("❌ Bot error:", err);
+// Error handler for bot
+bot.catch((err) => {
+    console.error("❌ Bot error:", err);
+});
+
+// Start
+(async () => {
+    console.log("Bot starting...");
+    await auth.startUserbot();
+
+    // Load State from Cloud (Telegram Saved Messages)
+    console.log("☁️ Loading state from cloud (V2)...");
+    const cloudState = await auth.loadAppState();
+
+    // Restore Stocks
+    if (cloudState.stocks && cloudState.stocks.length > 0) {
+        watchedStocks = cloudState.stocks;
+        console.log(`✅ Loaded ${watchedStocks.length} stocks from cloud.`);
+    }
+
+    // Restore Active State
+    if (cloudState.isBotActive !== undefined) {
+        isBotActive = cloudState.isBotActive;
+        console.log(`✅ Restored Bot Mode: ${isBotActive ? 'ACTIVE' : 'PASSIVE'}`);
+    } else {
+        console.log("ℹ️ No active state found, defaulting to ACTIVE.");
+        isBotActive = true;
+    }
+
+    console.log("🤖 Starting Telegram Bot...");
+
+    // Retry logic for bot authentication (Hugging Face network can be flaky)
+    let retries = 3;
+    let authenticated = false;
+
+    while (retries > 0 && !authenticated) {
+        try {
+            const me = await bot.api.getMe();
+            console.log(`✅ Bot authenticated as @${me.username} (${me.first_name})`);
+            authenticated = true;
+        } catch (e) {
+            retries--;
+            console.error(`❌ Bot authentication failed (${3 - retries}/3): ${e.message}`);
+            if (retries > 0) {
+                console.log(`⏳ Retrying in 3 seconds...`);
+                await new Promise(r => setTimeout(r, 3000));
+            }
+        }
+    }
+
+    if (!authenticated) {
+        console.error("❌ CRITICAL: Could not authenticate bot after 3 attempts!");
+        console.error("Please check BOT_TOKEN in Hugging Face secrets.");
+    }
+
+    // 409 Conflict & Startup Logic
+    const startBotWithRetry = async (retryCount = 0) => {
+        const delays = [20000, 30000, 40000, 60000]; // Increased to 20s, 30s, 40s, 60s
+        const delay = delays[retryCount] || 60000;
+
+        console.log(`⏳ Waiting ${delay / 1000} seconds before starting bot (Instance conflict prevention - Attempt ${retryCount + 1})...`);
+        await new Promise(r => setTimeout(r, delay));
+
+        try {
+            // bot.start() is non-blocking in Grammy, but we wrap it carefully
+            await bot.start({
+                onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
+                drop_pending_updates: true
             });
-
-            // Start
-            (async () => {
-                console.log("Bot starting...");
-                await auth.startUserbot();
-
-                // Load State from Cloud (Telegram Saved Messages)
-                console.log("☁️ Loading state from cloud (V2)...");
-                const cloudState = await auth.loadAppState();
-
-                // Restore Stocks
-                if (cloudState.stocks && cloudState.stocks.length > 0) {
-                    watchedStocks = cloudState.stocks;
-                    console.log(`✅ Loaded ${watchedStocks.length} stocks from cloud.`);
+        } catch (err) {
+            if (err.description?.includes("Conflict") || err.code === 409) {
+                console.warn(`⚠️ Bot conflict detected! (Attempt ${retryCount + 1}/5). Retrying in next cycle...`);
+                if (retryCount < 5) {
+                    return startBotWithRetry(retryCount + 1);
                 }
+            } else {
+                console.error("❌ Bot encountered an error during start:", err.message);
+                // Don't crash the whole process, try to wait and restart
+                setTimeout(() => startBotWithRetry(0), 10000);
+            }
+        }
+    };
 
-                // Restore Active State
-                if (cloudState.isBotActive !== undefined) {
-                    isBotActive = cloudState.isBotActive;
-                    console.log(`✅ Restored Bot Mode: ${isBotActive ? 'ACTIVE' : 'PASSIVE'}`);
-                } else {
-                    console.log("ℹ️ No active state found, defaulting to ACTIVE.");
-                    isBotActive = true;
-                }
+    await startBotWithRetry();
 
-                console.log("🤖 Starting Telegram Bot...");
-
-                // Retry logic for bot authentication (Hugging Face network can be flaky)
-                let retries = 3;
-                let authenticated = false;
-
-                while (retries > 0 && !authenticated) {
-                    try {
-                        const me = await bot.api.getMe();
-                        console.log(`✅ Bot authenticated as @${me.username} (${me.first_name})`);
-                        authenticated = true;
-                    } catch (e) {
-                        retries--;
-                        console.error(`❌ Bot authentication failed (${3 - retries}/3): ${e.message}`);
-                        if (retries > 0) {
-                            console.log(`⏳ Retrying in 3 seconds...`);
-                            await new Promise(r => setTimeout(r, 3000));
-                        }
-                    }
-                }
-
-                if (!authenticated) {
-                    console.error("❌ CRITICAL: Could not authenticate bot after 3 attempts!");
-                    console.error("Please check BOT_TOKEN in Hugging Face secrets.");
-                }
-
-                // 409 Conflict & Startup Logic
-                const startBotWithRetry = async (retryCount = 0) => {
-                    const delays = [20000, 30000, 40000, 60000]; // Increased to 20s, 30s, 40s, 60s
-                    const delay = delays[retryCount] || 60000;
-
-                    console.log(`⏳ Waiting ${delay / 1000} seconds before starting bot (Instance conflict prevention - Attempt ${retryCount + 1})...`);
-                    await new Promise(r => setTimeout(r, delay));
-
-                    try {
-                        // bot.start() is non-blocking in Grammy, but we wrap it carefully
-                        await bot.start({
-                            onStart: (info) => console.log(`✅ Bot is now listening as @${info.username}`),
-                            drop_pending_updates: true
-                        });
-                    } catch (err) {
-                        if (err.description?.includes("Conflict") || err.code === 409) {
-                            console.warn(`⚠️ Bot conflict detected! (Attempt ${retryCount + 1}/5). Retrying in next cycle...`);
-                            if (retryCount < 5) {
-                                return startBotWithRetry(retryCount + 1);
-                            }
-                        } else {
-                            console.error("❌ Bot encountered an error during start:", err.message);
-                            // Don't crash the whole process, try to wait and restart
-                            setTimeout(() => startBotWithRetry(0), 10000);
-                        }
-                    }
-                };
-
-                await startBotWithRetry();
-
-                if (!isCheckRunning) {
-                    console.log("🚀 Launching initial market check...");
-                    checkMarket();
-                }
-            })();
+    if (!isCheckRunning) {
+        console.log("🚀 Launching initial market check...");
+        checkMarket();
+    }
+})();
