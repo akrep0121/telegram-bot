@@ -182,41 +182,40 @@ async function mainLoop() {
                 }
 
                 // ALERT LOGIC
-                let alertMsg = "";
+                // We check two conditions. If either triggers, we formulate the message.
+                // Priority: Check Average Drop first, then Sudden Drop.
+
+                let isAlert = false;
+                let baseline = 0;
+                let dropRatio = 0;
+                let reason = "";
 
                 // Condition 1: Drop 50% from Daily Average
-                // Only if we calculate an average (have data)
-                if (data.dailyAvg > 0) {
-                    const avgThreshold = data.dailyAvg * 0.5; // 50% drop
-                    if (currentLot < avgThreshold) {
-                        alertMsg += `⚠️ **KRİTİK DÜŞÜŞ (ORTALAMA)!**\n` +
-                            `📉 ${fmt(currentLot)} < ${fmt(data.dailyAvg)} (Ort)\n` +
-                            `Durum: %50'den fazla düşüş.\n`;
-                    }
+                if (data.dailyAvg > 0 && currentLot < data.dailyAvg * 0.5) {
+                    isAlert = true;
+                    baseline = data.dailyAvg;
+                    dropRatio = ((data.dailyAvg - currentLot) / data.dailyAvg) * 100;
+                    reason = `Başlangıç eşiği (${fmt(baseline)}) aşıldı! %${dropRatio.toFixed(1)} düşüş`;
                 }
-
                 // Condition 2: Drop 30% from Previous Read (Sudden Crash)
-                if (data.prevLot > 0) {
-                    const suddenThreshold = data.prevLot * 0.7; // 30% drop (70% remaining)
-                    if (currentLot < suddenThreshold) {
-                        alertMsg += `⚠️ **ANİ ÇÖKÜŞ!**\n` +
-                            `📉 ${fmt(currentLot)} < ${fmt(data.prevLot)} (Önceki)\n` +
-                            `Durum: %30'dan fazla ani kayıp.\n`;
-                    }
+                else if (data.prevLot > 0 && currentLot < data.prevLot * 0.7) {
+                    isAlert = true;
+                    baseline = data.prevLot;
+                    dropRatio = ((data.prevLot - currentLot) / data.prevLot) * 100;
+                    reason = `Ani çöküş! Önceki okumadan %${dropRatio.toFixed(1)} düşüş`;
                 }
 
-                // Send Alert if triggered
-                if (alertMsg) {
-                    const fullMsg = `🚨 **TAVAN BOZMA ALARMI** 🚨\n\n` +
-                        `Hisse: #${stock}\n${alertMsg}`;
-                    await broadcast(fullMsg);
+                if (isAlert) {
+                    const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                        `📈 Hisse: ${stock}\n` +
+                        `🔴 Mevcut Lot: ${fmt(currentLot)}\n` +
+                        `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
+                        `📉 Düşüş Oranı: %${dropRatio.toFixed(1)}\n` +
+                        `🔍 Sebep: ${reason}\n` +
+                        `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(currentLot)}\n\n` +
+                        `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
 
-                    // Prevent spam? Updates data.prevLot below, so next loop 
-                    // won't trigger sudden drop again unless it drops FURTHER.
-                    // But Avg drop will trigger continuously if it stays low.
-                    // Implementation choice: Keep alerting or flag as 'alerted'?
-                    // User requested "alarm message atmalı", implies continuous or once per incident.
-                    // We'll keep it simple: it alerts every cycle if condition met.
+                    await broadcast(alertMsg);
                 }
 
                 // Update Previous
@@ -266,35 +265,34 @@ async function performStockCheck(symbol, verboseCtx = null) {
 // --- HELPERS ---
 
 function isHoliday(day, month) {
-    // Simple TR Holiday List (Fixed Dates)
-    const holidays = [
-        "1-1",   // New Year
-        "23-4",  // Children's Day
-        "1-5",   // Labor Day
-        "19-5",  // Youth Day
-        "15-7",  // Democracy Day
-        "30-8",  // Victory Day
-        "29-10"  // Republic Day
-    ];
-    const key = `${day}-${month}`;
-    return holidays.includes(key);
+    const holidays = ["1-1", "23-4", "1-5", "19-5", "15-7", "30-8", "29-10"];
+    return holidays.includes(`${day}-${month}`);
 }
 
 async function sendGeneralReport(hour) {
     if (watchedStocks.length === 0) return;
 
-    let report = `📊 **Piyasa Durum Raporu (${hour}:00)**\n\n`;
+    let report = `📊 Günlük Durum Raporu (${hour}:00)\n\n`;
 
     for (const stock of watchedStocks) {
         const data = stockData[stock];
         if (data && data.prevLot) {
-            // Compare to Daily Avg if available
-            const trend = (data.dailyAvg > 0 && data.prevLot < data.dailyAvg) ? '📉' : '✅';
-            report += `${trend} #${stock}: ${fmt(data.prevLot)} Lot (Ort: ${fmt(data.dailyAvg)})\n`;
+            report += `🔹 ${stock}: ${fmt(data.prevLot)} Lot\n`;
         } else {
-            report += `⏳ #${stock}: Veri yok\n`;
+            report += `🔹 ${stock}: Veri bekleniyor...\n`;
         }
     }
+
+    report += `\n✅ Şu an için herhangi bir risk görünmemektedir.\n`;
+
+    // Next control time
+    let nextHour = hour + 2;
+    if (nextHour <= 18) {
+        report += `🕒 Bir sonraki kontrol ${nextHour}:00'da yapılacaktır.`;
+    } else {
+        report += `🕒 Borsa günü tamamlandı.`;
+    }
+
     await broadcast(report);
 }
 
