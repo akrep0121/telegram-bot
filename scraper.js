@@ -1,381 +1,100 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-puppeteer.use(StealthPlugin());
-
+const Tesseract = require('tesseract.js');
 const fs = require('fs');
 
-// Telegram WebApp API Mock - Essential for bypassing environment checks
-const TELEGRAM_MOCK = `
-    window.Telegram = {
-        WebApp: {
-            initData: "",
-            initDataUnsafe: {},
-            version: "6.0",
-            platform: "android",
-            colorScheme: "light",
-            themeParams: {},
-            isExpanded: true,
-            viewportHeight: 800,
-            viewportStableHeight: 800,
-            headerColor: "#ffffff",
-            backgroundColor: "#ffffff",
-            isClosingConfirmationEnabled: false,
-            ready: function() { console.log("Telegram.WebApp.ready()"); },
-            expand: function() {},
-            close: function() {},
-            enableClosingConfirmation: function() {},
-            disableClosingConfirmation: function() {},
-            onEvent: function() {},
-            offEvent: function() {},
-            sendData: function() {},
-            openLink: function() {},
-            openTelegramLink: function() {},
-            showPopup: function() {},
-            showAlert: function() {},
-            showConfirm: function() {},
-            MainButton: {
-                text: "", 
-                color: "#2481cc", 
-                textColor: "#ffffff", 
-                isVisible: false, 
-                isActive: true,
-                show: function() { this.isVisible = true; },
-                hide: function() { this.isVisible = false; },
-                enable: function() { this.isActive = true; },
-                disable: function() { this.isActive = false; },
-                setText: function(t) { this.text = t; },
-                onClick: function() {},
-                offClick: function() {},
-                showProgress: function() {},
-                hideProgress: function() {}
-            },
-            BackButton: {
-                isVisible: false,
-                onClick: function() {},
-                offClick: function() {},
-                show: function() { this.isVisible = true; },
-                hide: function() { this.isVisible = false; }
-            },
-            HapticFeedback: {
-                impactOccurred: function() {},
-                notificationOccurred: function() {},
-                selectionChanged: function() {}
-            }
-        }
-    };
-`;
-
-/**
- * Launches a Headless Browser with Telegram Mock and Mobile UA.
- */
-async function fetchMarketData(url, symbol) {
-    let browser = null;
+async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        browser = await puppeteer.launch({
-            headless: "new",
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process'
-            ]
-        });
+        console.log(`[OCR] ${symbol} - Starting OCR processing...`);
 
-        const page = await browser.newPage();
-
-        // Mobile Viewport
-        await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
-
-        // Mobile User Agent (Android)
-        await page.setUserAgent('Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36');
-
-        // Inject Telegram Mock BEFORE navigation
-        await page.evaluateOnNewDocument(TELEGRAM_MOCK);
-
-        console.log(`[SCRAPER] ${symbol} - Navigating...`);
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-
-        // Wait for page load
-        await new Promise(r => setTimeout(r, 4000));
-
-        // DEBUG: Check page state
-        const pageState = await page.evaluate(() => {
-            const body = document.body.innerText;
-            return {
-                expired: body.includes('Oturum Sona Erdi') || body.includes('Bağlantınız kesildi'),
-                warning: body.includes('10 dakika'),
-                telegramPresent: !!window.Telegram.WebApp,
-                preview: body.slice(0, 200).replace(/\n/g, ' ')
-            };
-        });
-        console.log(`[DEBUG] ${symbol} State: Expired=${pageState.expired}, Warning=${pageState.warning}, Mock=${pageState.telegramPresent}`);
-
-        // HANDLE MODALS AND RECONNECT
-        if (pageState.expired) {
-            console.log(`[SCRAPER] ${symbol} - Session expired detected. Attempting recovery...`);
-
-            // Try clicking Reconnect
-            await page.evaluate(() => {
-                const btns = Array.from(document.querySelectorAll('button, a, div, span'));
-                const reconnect = btns.find(b => (b.innerText || "").toLowerCase().includes('yeniden bağlan'));
-                if (reconnect) {
-                    reconnect.click();
-                    reconnect.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                }
-            });
-
-            // Wait for reaction
-            await new Promise(r => setTimeout(r, 5000));
-
-            // Check if still expired
-            const stillExpired = await page.evaluate(() => document.body.innerText.includes('Oturum Sona Erdi'));
-
-            if (stillExpired) {
-                console.log(`[SCRAPER] ${symbol} - Reconnect click didn't work. Forcing page reload...`);
-                await page.reload({ waitUntil: 'networkidle2' });
-                await new Promise(r => setTimeout(r, 4000));
-
-                // Inject mock again after reload
-                await page.evaluate(TELEGRAM_MOCK);
-            } else {
-                console.log(`[SCRAPER] ${symbol} - Reconnect successful!`);
-            }
-        }
-
-        // Dismiss warning modal (Always try this)
-        console.log(`[SCRAPER] ${symbol} - Dismissing modals...`);
-        // 1. Try Enter
-        await page.keyboard.press('Enter');
-        await new Promise(r => setTimeout(r, 500));
-
-        // 2. Try clicking coordinates (Bottom center - often 'Tamam'/'Anladim')
-        await page.mouse.click(195, 750);
-        await new Promise(r => setTimeout(r, 500));
-        await page.mouse.click(195, 700);
-
-        // 3. Try clicking "Anladım" / "Tamam" buttons
-        await page.evaluate(() => {
-            const texts = ['anladım', 'tamam', 'devam', 'kapat', 'ok', 'close'];
-            const all = Array.from(document.querySelectorAll('button, div[role="button"], a, span'));
-            for (const el of all) {
-                const txt = (el.innerText || "").toLowerCase().trim();
-                if (texts.some(t => txt === t || txt.includes(t)) && !txt.includes('yeniden')) {
-                    el.click();
-                }
-            }
-        });
-        await new Promise(r => setTimeout(r, 2000));
-
-        // SEARCH
-        console.log(`[SCRAPER] ${symbol} - Searching...`);
-
-        // Try multiple selectors for input
-        const inputSelectors = ['#addSymbolInput', '#searchInput', 'input[type="text"]', 'input[type="search"]'];
-        let inputFound = false;
-
-        for (const sel of inputSelectors) {
-            if (await page.$(sel)) {
-                console.log(`[SCRAPER] Found input: ${sel}`);
-                await page.click(sel);
-                // Select all and delete
-                await page.evaluate((s) => { document.querySelector(s).value = ''; }, sel);
-                await page.type(sel, symbol, { delay: 100 });
-                inputFound = true;
-                break;
-            }
-        }
-
-        if (!inputFound) {
-            console.log(`[SCRAPER] No input found! Dumping body...`);
-            const bodyDump = await page.evaluate(() => document.body.innerText.slice(0, 300));
-            console.log(`[DUMP] ${bodyDump}`);
-            return null;
-        }
-
-        await new Promise(r => setTimeout(r, 1000));
-        await page.keyboard.press('Enter');
-        await new Promise(r => setTimeout(r, 4000));
-
-        // CLICK RESULT
-        console.log(`[SCRAPER] ${symbol} - Clicking result...`);
-        // Use the robust finding logic from older working code but adapted
-        const clicked = await page.evaluate((sym) => {
-            // Try specific container first
-            const container = document.getElementById('searchResults');
-            if (container) {
-                const rows = Array.from(container.querySelectorAll('.search-row, div, li'));
-                const match = rows.find(r => r.innerText.toUpperCase().includes(sym));
-                if (match) { match.click(); return "clicked_container"; }
-            }
-
-            // Fallback to global search
-            const all = Array.from(document.querySelectorAll('div, span, li'));
-            const match = all.find(el => {
-                const t = el.innerText.toUpperCase();
-                return t === sym || t.startsWith(sym + " ") || t.startsWith(sym + "\n");
-            });
-            if (match) { match.click(); return "clicked_global"; }
-
-            return "not_found";
-        }, symbol);
-
-        if (clicked === "not_found") {
-            // Fallback: Click first generic result
-            console.log(`[SCRAPER] ${symbol} - Not found specific, clicking first valid result...`);
-            await page.evaluate(() => {
-                const first = document.querySelector('#searchResults > div, .search-row');
-                if (first) first.click();
-            });
-        }
-
-        await new Promise(r => setTimeout(r, 4000));
-
-        // CLICK DEPTH TAB
-        console.log(`[SCRAPER] ${symbol} - Opening Depth Loop...`);
-        let depthSuccess = false;
-
-        // Retry clicking depth tab
-        for (let i = 0; i < 3; i++) {
-            const clickResult = await page.evaluate(async () => {
-                const tabs = Array.from(document.querySelectorAll('button, div, span, a, li'));
-                const depth = tabs.find(t => {
-                    const txt = (t.innerText || "").toLowerCase().trim();
-                    return txt === 'derinlik' || txt.includes('derinlik');
-                });
-
-                if (depth) {
-                    // Try to make it visible
-                    depth.scrollIntoView({ behavior: 'instant', block: 'center' });
-
-                    // Get rect
-                    const rect = depth.getBoundingClientRect();
-
-                    // Check if rect is valid
-                    if (rect.width > 0 && rect.height > 0) {
-                        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: depth.tagName };
-                    } else {
-                        return { found: true, x: 0, y: 0, tag: "HIDDEN_DEPTH" };
+        // Recognize text from image buffer
+        // using Turkish language for better accuracy with "Emir", "Adet", "Alış"
+        const result = await Tesseract.recognize(
+            imageBuffer,
+            'eng+tur',
+            {
+                logger: m => {
+                    // Only log progress every 20-30% to avoid clutter
+                    if (m.status === 'recognizing text' && (Math.round(m.progress * 100) % 25 === 0)) {
+                        console.log(`[OCR] ${symbol} Progress: ${Math.round(m.progress * 100)}%`);
                     }
                 }
-                return { found: false };
-            });
+            }
+        );
 
-            if (clickResult.found) {
-                let clickX = clickResult.x;
-                let clickY = clickResult.y;
+        const text = result.data.text;
+        console.log(`[OCR] ${symbol} Raw Text Preview:\n${text.substring(0, 300)}...`);
 
-                // Fallback for 0,0 (Hidden element) - Guess common position
-                // Depth tab is usually near the top, under the chart
-                if (clickX === 0 && clickY === 0) {
-                    console.log(`[SCRAPER] ${symbol} - Depth element hidden (0,0), using fallback coordinates...`);
-                    clickX = 195; // Center width
-                    clickY = 350; // Approximated height
+        // PARSING LOGIC
+        // We are looking for the "Adet" column in the "Alış" section (Left side typically).
+        // Structure:
+        // Emir | Adet | Alış | Satış | Adet | Emir
+        // 4753 | 3.444.761 | 44.24 | ...
+
+        // We want the first number under "Adet" (or the largest on the left)
+        // Let's split by lines
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+            // Clean line
+            const clean = line.trim();
+            if (!clean) continue;
+
+            // Regex to match the pattern: Number Space Number(with dots) Space Number(decimal)
+            // Example: 4753 3.444.761 44.24
+
+            // Heuristic: Look for lines that have 3 or more distinct numbers separated by space
+            // And the middle one is large (Lot)
+
+            // Remove dots/commas to simplify regex for structure check
+            // BUT keep them for extraction
+
+            // Try to identify the "data row" pattern
+            // A typical data row starts with an integer (Emir count)
+            // Followed by a large integer (Lot)
+            // Followed by a float (Price)
+
+            const parts = clean.split(/\s+/);
+
+            // We need at least 3 parts for the left side of the table
+            if (parts.length >= 3) {
+                // Check 1st part (Emir count): Integer
+                const p1 = parseInt(parts[0].replace(/\D/g, ''));
+
+                // Check 2nd part (Lot): Integer, likely large (has dots)
+                const p2Raw = parts[1];
+                const p2 = parseInt(p2Raw.replace(/\./g, '').replace(/,/g, ''));
+
+                // Check 3rd part (Price): Float
+                const p3Raw = parts[2];
+                // Price usually has decimal point or comma
+                const p3 = parseFloat(p3Raw.replace(',', '.'));
+
+                // VALIDATING THE DATA ROW
+                // 1. Emir count should be > 0
+                // 2. Lot should be > 100 (assume)
+                // 3. Price should be reasonable (e.g. > 0 and < 10000)
+
+                if (!isNaN(p1) && !isNaN(p2) && !isNaN(p3)) {
+                    if (p2 > 100 && p3 > 0 && p3 < 100000) {
+                        console.log(`[OCR] ${symbol} - MATCH FOUND: ${clean}`);
+                        console.log(`[OCR] ${symbol} - Extracted Lot: ${p2}`);
+                        return {
+                            symbol,
+                            topBidLot: p2,
+                            price: p3,
+                            isCeiling: true // Assume ceiling if we are asking for depth
+                        };
+                    }
                 }
-
-                console.log(`[SCRAPER] ${symbol} - Clicking Depth at ${clickX}, ${clickY}`);
-                await page.mouse.click(clickX, clickY);
-                depthSuccess = true;
-            } else {
-                console.log(`[SCRAPER] ${symbol} - Depth tab text not found, trying blind click...`);
-                // Blind click attempt at likely location
-                await page.mouse.click(280, 420); // Right-middle area
             }
-
-            // Wait and check if table appeared
-            await new Promise(r => setTimeout(r, 2000));
-            const hasTable = await page.evaluate(() => document.body.innerText.includes('Lot') || document.body.innerText.includes('Alış'));
-
-            if (hasTable) {
-                console.log(`[SCRAPER] ${symbol} - Depth table detected!`);
-                break;
-            } else {
-                console.log(`[SCRAPER] ${symbol} - Depth table NOT detected yet... retrying`);
-                // Also try hitting Escape to clear any potential blocking modal
-                await page.keyboard.press('Escape');
-            }
-
-            await new Promise(r => setTimeout(r, 1000));
         }
 
-        await new Promise(r => setTimeout(r, 2000));
-
-        // DEBUG: Check if we are actually on the depth tab
-        const depthCheck = await page.evaluate(() => {
-            const body = document.body.innerText;
-            return {
-                hasLotHeader: body.includes('Lot') || body.includes('Alış'),
-                sample: body.slice(0, 300).replace(/\n/g, ' ')
-            };
-        });
-        console.log(`[DEBUG] ${symbol} After Depth Click: HasLotHeader=${depthCheck.hasLotHeader}, Content=${depthCheck.sample}`);
-
-        // EXTRACT LOOP (Wait for data)
-        console.log(`[SCRAPER] ${symbol} - Extracting...`);
-        const data = await page.evaluate(() => {
-            const getPrice = () => {
-                const el = document.getElementById('lastPrice') || document.querySelector('.price-main');
-                return el ? el.innerText.trim() : "0";
-            };
-            const price = getPrice();
-
-            const lines = document.body.innerText.split('\n');
-            let maxLot = 0;
-            const currentYear = new Date().getFullYear();
-
-            // Collect all candidate numbers for debugging inside evaluate if needed
-            // identifying lots: integers, large, not years
-            lines.forEach(line => {
-                // Heuristics to skip non-lot lines
-                if (line.includes(':') || line.length > 50) return;
-
-                // Remove thousands separators
-                const cleanLine = line.replace(/\./g, '').replace(/,/g, '');
-
-                const nums = cleanLine.match(/\d+/g);
-                if (!nums) return;
-
-                nums.forEach(nStr => {
-                    const n = parseInt(nStr, 10);
-
-                    // Filter:
-                    // 1. Must be > 100
-                    // 2. Must be < 100M
-                    // 3. Must NOT be a year (2024, 2025, 2026, 2027 ± 1)
-                    // 4. Must NOT be commonly found static numbers (like 1800, 900 if those are persistent UI elements)
-
-                    if (n > 100 && n < 50000000) {
-                        // Strict Year Filter
-                        if (n >= currentYear - 1 && n <= currentYear + 2) return;
-
-                        if (n > maxLot) maxLot = n;
-                    }
-                });
-            });
-
-            return {
-                priceStr: price,
-                topBidLot: maxLot,
-                isCeiling: false
-            };
-        });
-
-        console.log(`[SCRAPER] ${symbol} -> Lot: ${data.topBidLot}`);
-
-        return {
-            symbol,
-            priceStr: data.priceStr,
-            ceilingStr: data.priceStr, // Assume ceiling for now
-            topBidLot: data.topBidLot,
-            isCeiling: data.topBidLot > 0
-        };
+        console.log(`[OCR] ${symbol} - No valid data row found.`);
+        return null;
 
     } catch (e) {
-        console.error(`Puppeteer Error (${symbol}):`, e.message);
+        console.error(`[OCR] Error processing image for ${symbol}:`, e.message);
         return null;
-    } finally {
-        if (browser) await browser.close();
     }
 }
 
-module.exports = { fetchMarketData };
+module.exports = { extractLotFromImage };
