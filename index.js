@@ -197,32 +197,45 @@ bot.command("test", async (ctx) => {
         return ctx.reply("Takip listeniz boş.");
     }
 
-    const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)....\nLütfen bekleyin...`);
+    const testMsg = await ctx.reply(`🚀 [ID: ${INSTANCE_ID}] Canlı kontrol başlatıldı (${watchedStocks.length} hisse)...\nLütfen bekleyin... Resim analizi yapılıyor.`);
 
     for (let i = 0; i < watchedStocks.length; i++) {
         const stock = watchedStocks[i];
-        console.log(`[COLOSSUS] Scrape start: ${stock}`);
+        console.log(`[COLOSSUS] Test start: ${stock}`);
 
-        // Get FRESH URL for each stock (critical for session validity)
-        const url = await auth.getFreshWebAppUrl();
-        if (!url) {
-            console.error(`[ERROR] Could not get fresh URL for ${stock}`);
+        await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ${stock}: Komut gönderiliyor...`);
+
+        // 1. Send Command
+        await auth.requestStockDerinlik(stock);
+
+        await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ${stock}: Fotoğraf bekleniyor...`);
+
+        // 2. Wait
+        const responseMsg = await auth.waitForBotResponse(20000);
+        if (!responseMsg) {
+            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ⚠️ ${stock}: Yanıt gelmedi (Timeout).`);
             continue;
         }
-        console.log(`[AUTH] Fresh URL obtained for ${stock}`);
 
-        const data = await scraper.fetchMarketData(url, stock);
+        await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length}) ${stock}: OCR Okunuyor...`);
+
+        // 3. Download
+        const photoBuffer = await auth.downloadBotPhoto(responseMsg);
+
+        // 4. OCR
+        const data = await scraper.extractLotFromImage(photoBuffer, stock);
+
         if (data && data.topBidLot > 0) {
             marketCache[stock] = {
                 history: [data.topBidLot],
                 initialAvg: data.topBidLot,
                 lastLot: data.topBidLot
             };
-            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n✅ ${stock} tamamlandı: ${fmtNum(data.topBidLot)} Lot`);
+            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length})\n✅ ${stock}: ${fmtNum(data.topBidLot)} Lot`);
         } else {
-            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] Kontrol ediliyor: (${i + 1}/${watchedStocks.length})\n⚠️ ${stock} verisi alınamadı.`);
+            await ctx.api.editMessageText(ctx.chat.id, testMsg.message_id, `🚀 [ID: ${INSTANCE_ID}] (${i + 1}/${watchedStocks.length})\n⚠️ ${stock}: OCR Okuyamadı.`);
         }
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 2000));
     }
 
     await sendStatusReport(true, ctx.chat.id, true);
@@ -280,50 +293,66 @@ async function checkMarket() {
 
         // Get Fresh Auth URL (Once per cycle, or per stock? URL is valid for 10 mins)
         // We can reuse it for all stocks in this burst.
-        const url = await auth.getFreshWebAppUrl();
+        // const url = await auth.getFreshWebAppUrl(); // This line is removed as it's not needed for OCR flow
 
-        if (!url) {
-            console.error("Failed to generate Web App URL.");
-            isCheckRunning = false;
-            return;
-        }
+        // if (!url) {
+        //     console.error("Failed to generate Web App URL.");
+        //     isCheckRunning = false;
+        //     return;
+        // }
 
         for (const stock of watchedStocks) {
-            console.log(`Checking ${stock}...`);
-            const data = await scraper.fetchMarketData(url, stock);
+            // Double check active state inside loop in case user paused mid-loop
+            if (!isBotActive) break;
 
-            if (!data) {
-                console.log(`Skipping ${stock} due to scrape error.`);
+            console.log(`[MARKET CHECK] Checking ${stock}...`);
+
+            // 1. Send /derinlik command
+            const cmdSent = await auth.requestStockDerinlik(stock);
+            if (!cmdSent) {
+                console.error(`[ERROR] Fail to send command for ${stock}`);
                 continue;
             }
 
-            // --- LOGIC ---
-            // "tavandaki lot sayısı"
-            // We only care if it's at ceiling (or very close)
+            // 2. Wait for response (Photo)
+            const responseMsg = await auth.waitForBotResponse(20000); // 20s timeout
+            if (!responseMsg) {
+                console.log(`[WARN] No response for ${stock} (Timeout)`);
+                continue;
+            }
+
+            // 3. Download Photo
+            const photoBuffer = await auth.downloadBotPhoto(responseMsg);
+            if (!photoBuffer) {
+                console.error(`[ERROR] Failed to download photo for ${stock}`);
+                continue;
+            }
+
+            // 4. Run OCR
+            const data = await scraper.extractLotFromImage(photoBuffer, stock);
+
+            if (!data) {
+                console.log(`[WARN] OCR could not extract data for ${stock}`);
+                continue;
+            }
 
             const currentLot = data.topBidLot;
 
-            // Initialize cache
+            // Initialize Cache
             if (!marketCache[stock]) {
                 marketCache[stock] = {
                     history: [],
-                    initialAvg: 0,
+                    initialAvg: currentLot, // First read is the reference
                     lastLot: currentLot
                 };
             }
 
             const cache = marketCache[stock];
-
+            cache.history.push(currentLot);
+            if (cache.history.length > 50) cache.history.shift();
             // Update History (For initial 10 checks)
-            if (cache.history.length < 10 && currentLot > 0) {
-                cache.history.push(currentLot);
-                // logic: if length hits 10, calc average
-                if (cache.history.length === 10) {
-                    const sum = cache.history.reduce((a, b) => a + b, 0);
-                    cache.initialAvg = Math.floor(sum / 10);
-                    console.log(`[${stock}] Initial Average: ${fmtNum(cache.initialAvg)}`);
-                }
-            }
+        }
+    }
 
             // ALERT CONDITIONS
             // Only alert if we are functionally at ceiling (isCeiling=true)
@@ -333,76 +362,76 @@ async function checkMarket() {
             // If data.isCeiling became false, that ITSELF is a "Tavan bozdu" event.
 
             let alertMsg = "";
-            let reason = "";
-            let dropRate = 0;
+    let reason = "";
+    let dropRate = 0;
 
-            if (data.isCeiling) {
-                // Condition 1: 20% drop from previous
-                if (cache.lastLot > 0) {
-                    const drop = (cache.lastLot - currentLot) / cache.lastLot;
-                    if (drop >= 0.20) {
-                        dropRate = (drop * 100).toFixed(1);
-                        reason = `Ani düşüş! %${dropRate} (Önceki: ${fmtNum(cache.lastLot)})`;
+    if (data.isCeiling) {
+        // Condition 1: 20% drop from previous
+        if (cache.lastLot > 0) {
+            const drop = (cache.lastLot - currentLot) / cache.lastLot;
+            if (drop >= 0.20) {
+                dropRate = (drop * 100).toFixed(1);
+                reason = `Ani düşüş! %${dropRate} (Önceki: ${fmtNum(cache.lastLot)})`;
 
-                        alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                            `📈 Hisse: ${stock}\n` +
-                            `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
-                            `📊 Önceki Lot: ${fmtNum(cache.lastLot)}\n` +
-                            `📉 Düşüş Oranı: %${dropRate}\n` +
-                            `🔍 Sebep: ${reason}\n` +
-                            `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
-                            `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
-                    }
-                }
-
-                // Condition 2: 50% drop from initial 10-check average
-                if (!alertMsg && cache.initialAvg > 0) { // If not already alerted
-                    if (currentLot < (cache.initialAvg * 0.50)) {
-                        const drop = (cache.initialAvg - currentLot) / cache.initialAvg;
-                        dropRate = (drop * 100).toFixed(1);
-                        reason = `Başlangıç eşiği (${fmtNum(cache.initialAvg)}) aşıldı! %${dropRate} düşüş`;
-
-                        alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                            `📈 Hisse: ${stock}\n` +
-                            `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
-                            `📊 Başlangıç Eşiği: ${fmtNum(cache.initialAvg)}\n` +
-                            `📉 Düşüş Oranı: %${dropRate}\n` +
-                            `🔍 Sebep: ${reason}\n` +
-                            `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
-                            `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
-                    }
-                }
-            } else {
-                // Not at ceiling
-                // If it WAS at ceiling recently, maybe alert?
-                // For now, simple logging.
-                // console.log(`${stock} is not at ceiling.`);
+                alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                    `📈 Hisse: ${stock}\n` +
+                    `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
+                    `📊 Önceki Lot: ${fmtNum(cache.lastLot)}\n` +
+                    `📉 Düşüş Oranı: %${dropRate}\n` +
+                    `🔍 Sebep: ${reason}\n` +
+                    `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
+                    `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
             }
-
-            // Send Alert
-            if (alertMsg) {
-                console.log(`ALERT for ${stock}: ${reason}`);
-                // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
-                // We need CHANNEL_ID in .env or config.
-                // For now sending to Saved Messages (me) or the channel if configured.
-                if (config.CHANNEL_ID) {
-                    try {
-                        await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
-                    } catch (e) { console.error("Send error:", e.message); }
-                } else {
-                    // Start user?
-                }
-            }
-
-            // Update Cache
-            cache.lastLot = currentLot;
         }
 
-    } catch (e) {
-        console.error("Loop Error:", e);
-    } finally {
-        isCheckRunning = false;
+        // Condition 2: 50% drop from initial 10-check average
+        if (!alertMsg && cache.initialAvg > 0) { // If not already alerted
+            if (currentLot < (cache.initialAvg * 0.50)) {
+                const drop = (cache.initialAvg - currentLot) / cache.initialAvg;
+                dropRate = (drop * 100).toFixed(1);
+                reason = `Başlangıç eşiği (${fmtNum(cache.initialAvg)}) aşıldı! %${dropRate} düşüş`;
+
+                alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                    `📈 Hisse: ${stock}\n` +
+                    `🔴 Mevcut Lot: ${fmtNum(currentLot)}\n` +
+                    `📊 Başlangıç Eşiği: ${fmtNum(cache.initialAvg)}\n` +
+                    `📉 Düşüş Oranı: %${dropRate}\n` +
+                    `🔍 Sebep: ${reason}\n` +
+                    `🔄 Önceki: ${fmtNum(cache.lastLot)} → Şimdiki: ${fmtNum(currentLot)}\n\n` +
+                    `Risk sevmeyenler için vedalaşma vaktidir. YTD.`;
+            }
+        }
+    } else {
+        // Not at ceiling
+        // If it WAS at ceiling recently, maybe alert?
+        // For now, simple logging.
+        // console.log(`${stock} is not at ceiling.`);
     }
+
+    // Send Alert
+    if (alertMsg) {
+        console.log(`ALERT for ${stock}: ${reason}`);
+        // Broadcast to channel? Or just log? User said "kendi kanalıma mesaj atsın"
+        // We need CHANNEL_ID in .env or config.
+        // For now sending to Saved Messages (me) or the channel if configured.
+        if (config.CHANNEL_ID) {
+            try {
+                await bot.api.sendMessage(config.CHANNEL_ID, alertMsg);
+            } catch (e) { console.error("Send error:", e.message); }
+        } else {
+            // Start user?
+        }
+    }
+
+    // Update Cache
+    cache.lastLot = currentLot;
+}
+
+    } catch (e) {
+    console.error("Loop Error:", e);
+} finally {
+    isCheckRunning = false;
+}
 }
 
 // Scheduler: Run every 20 seconds
