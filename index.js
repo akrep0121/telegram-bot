@@ -5,7 +5,7 @@ const config = require("./config");
 const fs = require('fs');
 const express = require('express');
 
-// --- KEEP-ALIVE SERVER (For Render/HuggingFace) ---
+// --- KEEP-ALIVE SERVER ---
 const app = express();
 const port = process.env.PORT || 7860;
 app.get('/', (req, res) => res.send('System V3 Running 🚀'));
@@ -27,8 +27,8 @@ bot.use(async (ctx, next) => {
 });
 
 // --- STATE ---
-let watchedStocks = []; // List of symbols
-let stockData = {};     // { 'SASA': { initialLot: 50000, lastLot: 45000 } }
+let watchedStocks = [];
+let stockData = {}; // { 'SASA': { day: 20, samples: [], dailyAvg: 0, prevLot: 0 } }
 let isBotActive = true;
 let isCheckRunning = false;
 let lastReportHour = -1;
@@ -46,6 +46,7 @@ bot.command("ekle", async (ctx) => {
 
     watchedStocks.push(symbol);
     await syncStateToCloud(`✅ ${symbol} eklendi.`);
+    ctx.reply(`✅ ${symbol} takibe alındı.`);
 });
 
 bot.command("sil", async (ctx) => {
@@ -55,6 +56,7 @@ bot.command("sil", async (ctx) => {
     watchedStocks = watchedStocks.filter(s => s !== symbol);
     delete stockData[symbol]; // Clear cache
     await syncStateToCloud(`🗑️ ${symbol} silindi.`);
+    ctx.reply(`🗑️ ${symbol} silindi.`);
 });
 
 bot.command("liste", (ctx) => {
@@ -63,8 +65,8 @@ bot.command("liste", (ctx) => {
     let msg = "📋 **Takip Listesi**\n";
     watchedStocks.forEach(s => {
         const data = stockData[s];
-        if (data) {
-            msg += `- ${s}: ${fmt(data.lastLot)} Lot (Başlangıç: ${fmt(data.initialLot)})\n`;
+        if (data && data.prevLot > 0) {
+            msg += `- ${s}: ${fmt(data.prevLot)} Lot (Ort: ${fmt(data.dailyAvg || 0)})\n`;
         } else {
             msg += `- ${s}: Veri bekleniyor...\n`;
         }
@@ -75,35 +77,28 @@ bot.command("liste", (ctx) => {
 bot.command("pasif", async (ctx) => {
     isBotActive = false;
     await syncStateToCloud("⏸️ Sistem pasife alındı.");
+    ctx.reply("⏸️ Bot PASİF moduna geçti. Sorgulama yapılmayacak.");
 });
 
 bot.command("aktif", async (ctx) => {
     isBotActive = true;
     await syncStateToCloud("▶️ Sistem aktif edildi.");
+    ctx.reply("▶️ Bot AKTİF moduna geçti. İşlemlere devam ediliyor.");
 });
 
-// --- CRITICAL: /TEST COMMAND ---
+// --- TEST COMMAND ---
 bot.command("test", async (ctx) => {
-    // 1. Only for Admin (Already handled by middleware, but double check)
-    // 2. Output ONLY to ctx (User), NEVER to Channel.
-
     if (watchedStocks.length === 0) return ctx.reply("Liste boş, test edilemez.");
-
     await ctx.reply(`🧪 Test Başlatılıyor (${watchedStocks.length} hisse)...`);
 
     for (const stock of watchedStocks) {
         await ctx.reply(`🔍 ${stock} kontrol ediliyor...`);
-
-        // Manual standard check cycle
-        const lot = await performStockCheck(stock, ctx); // Pass ctx for verbose logs to USER
-
+        const lot = await performStockCheck(stock, ctx);
         if (lot !== null) {
             await ctx.reply(`✅ ${stock} Başarılı! Okunan Lot: ${fmt(lot)}`);
         } else {
-            await ctx.reply(`❌ ${stock} Başarısız! (OCR/Timeout)`);
+            await ctx.reply(`❌ ${stock} Başarısız!`);
         }
-
-        // Wait a bit
         await delay(3000);
     }
     await ctx.reply("🏁 Test Tamamlandı.");
@@ -113,32 +108,46 @@ bot.command("test", async (ctx) => {
 // --- MAIN LOOP ---
 
 async function mainLoop() {
-    if (!isBotActive || isCheckRunning) return;
+    // 1. Activity Gate
+    if (!isBotActive) return;
+    if (isCheckRunning) return;
 
     const now = new Date();
     // Adjust to Turkey Time (UTC+3)
     const trTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+
+    // Time Components
     const hour = trTime.getUTCHours();
     const minute = trTime.getUTCMinutes();
-    const day = trTime.getUTCDay(); // 0=Sun, 6=Sat
+    const dayOfWeek = trTime.getUTCDay(); // 0=Sun, 6=Sat
+    const dayOfMonth = trTime.getUTCDate();
+    const month = trTime.getUTCMonth() + 1; // 1-12
 
-    // 1. Time Rules
-    // Market Hours: 10:00 - 18:00 (approx)
-    if (day === 0 || day === 6) return; // Weekend
-    if (hour < 9 || hour >= 18) return; // Night
+    // 2. Schedule Logic (09:56 - 18:00)
+
+    // Weekend Check
+    if (dayOfWeek === 0 || dayOfWeek === 6) return;
+
+    // Time Interval Check
+    const currentTimeVal = hour * 100 + minute; // e.g. 956 for 09:56
+    if (currentTimeVal < 956 || currentTimeVal >= 1800) return;
+
+    // Holiday Check
+    if (isHoliday(dayOfMonth, month)) return;
+
 
     isCheckRunning = true;
 
     try {
-        // 2. Reporting Schedule (10, 12, 14, 16, 18)
+        // 3. Reporting Schedule (10, 12, 14, 16, 18)
         const reportHours = [10, 12, 14, 16, 18];
         if (minute === 0 && reportHours.includes(hour) && lastReportHour !== hour) {
             await sendGeneralReport(hour);
             lastReportHour = hour;
         }
 
-        // 3. Stock Checks
-        console.log(`[LOOP] Starting check cycle for ${watchedStocks.length} stocks.`);
+        // 4. Stock Checks
+        console.log(`[LOOP] Cycle starting... Time: ${hour}:${minute}`);
 
         for (const stock of watchedStocks) {
             if (!isBotActive) break;
@@ -146,39 +155,75 @@ async function mainLoop() {
             const currentLot = await performStockCheck(stock);
 
             if (currentLot !== null) {
-                // Update Cache
+                // Initialize Data Structure if missing
                 if (!stockData[stock]) {
-                    stockData[stock] = { initialLot: currentLot, lastLot: currentLot };
+                    stockData[stock] = { day: dayOfMonth, samples: [], dailyAvg: 0, prevLot: 0 };
                 }
 
                 const data = stockData[stock];
 
-                // Alert Logic: Drop check
-                // If initialLot is 0/undefined, set it now
-                if (!data.initialLot) data.initialLot = currentLot;
-
-                // Check Threshold (e.g. 70%)
-                const threshold = data.initialLot * 0.7;
-                data.lastLot = currentLot;
-
-                if (currentLot < threshold) {
-                    // ALERT!
-                    const dropMsg = `⚠️ **TAVAN BOZMA RİSKİ!**\n\n` +
-                        `📉 Hisse: #${stock}\n` +
-                        `🔻 Mevcut Lot: ${fmt(currentLot)}\n` +
-                        `📊 Başlangıç: ${fmt(data.initialLot)}\n` +
-                        `⚠️ Kritik seviyenin altına indi!`;
-
-                    await broadcast(dropMsg);
-
-                    // Reset initial logic? Or keep alerting? 
-                    // To avoid spam, maybe update initialLot to current so we don't spam?
-                    // For now, valid alert.
+                // DAILY RESET LOGIC
+                if (data.day !== dayOfMonth) {
+                    // New Day! Reset stats
+                    console.log(`[LOGIC] New day for ${stock}. Resetting stats.`);
+                    data.day = dayOfMonth;
+                    data.samples = [];
+                    data.dailyAvg = 0;
+                    data.prevLot = 0; // Reset prev so we don't alert on first read
                 }
+
+                // AVERAGE CALCULATION (First 10 samples)
+                if (data.samples.length < 10) {
+                    data.samples.push(currentLot);
+                    // Recalculate Avg
+                    const sum = data.samples.reduce((a, b) => a + b, 0);
+                    data.dailyAvg = Math.floor(sum / data.samples.length);
+                    console.log(`[LOGIC] ${stock} Build Avg: ${data.dailyAvg} (Count: ${data.samples.length})`);
+                }
+
+                // ALERT LOGIC
+                let alertMsg = "";
+
+                // Condition 1: Drop 50% from Daily Average
+                // Only if we calculate an average (have data)
+                if (data.dailyAvg > 0) {
+                    const avgThreshold = data.dailyAvg * 0.5; // 50% drop
+                    if (currentLot < avgThreshold) {
+                        alertMsg += `⚠️ **KRİTİK DÜŞÜŞ (ORTALAMA)!**\n` +
+                            `📉 ${fmt(currentLot)} < ${fmt(data.dailyAvg)} (Ort)\n` +
+                            `Durum: %50'den fazla düşüş.\n`;
+                    }
+                }
+
+                // Condition 2: Drop 30% from Previous Read (Sudden Crash)
+                if (data.prevLot > 0) {
+                    const suddenThreshold = data.prevLot * 0.7; // 30% drop (70% remaining)
+                    if (currentLot < suddenThreshold) {
+                        alertMsg += `⚠️ **ANİ ÇÖKÜŞ!**\n` +
+                            `📉 ${fmt(currentLot)} < ${fmt(data.prevLot)} (Önceki)\n` +
+                            `Durum: %30'dan fazla ani kayıp.\n`;
+                    }
+                }
+
+                // Send Alert if triggered
+                if (alertMsg) {
+                    const fullMsg = `🚨 **TAVAN BOZMA ALARMI** 🚨\n\n` +
+                        `Hisse: #${stock}\n${alertMsg}`;
+                    await broadcast(fullMsg);
+
+                    // Prevent spam? Updates data.prevLot below, so next loop 
+                    // won't trigger sudden drop again unless it drops FURTHER.
+                    // But Avg drop will trigger continuously if it stays low.
+                    // Implementation choice: Keep alerting or flag as 'alerted'?
+                    // User requested "alarm message atmalı", implies continuous or once per incident.
+                    // We'll keep it simple: it alerts every cycle if condition met.
+                }
+
+                // Update Previous
+                data.prevLot = currentLot;
             }
 
-            // Wait between stocks to avoid spamming the target bot
-            // Reduced to 4s for faster cycle
+            // Wait 4s
             await delay(4000);
         }
 
@@ -191,28 +236,24 @@ async function mainLoop() {
 
 // Single Stock Check
 async function performStockCheck(symbol, verboseCtx = null) {
-    // 1. Send Command
     const sent = await auth.requestStockDerinlik(symbol);
     if (!sent) {
         if (verboseCtx) await verboseCtx.reply(`❌ ${symbol}: Komut gönderilemedi.`);
         return null;
     }
 
-    // 2. Wait Response
     const msg = await auth.waitForBotResponse(25000);
     if (!msg) {
         if (verboseCtx) await verboseCtx.reply(`⚠️ ${symbol}: Yanıt gelmedi (Timeout).`);
         return null;
     }
 
-    // 3. Download
     const buffer = await auth.downloadBotPhoto(msg);
     if (!buffer) {
         if (verboseCtx) await verboseCtx.reply(`⚠️ ${symbol}: Fotoğraf indirilemedi.`);
         return null;
     }
 
-    // 4. OCR
     const result = await scraper.extractLotFromImage(buffer, symbol);
     if (result && result.topBidLot) {
         return result.topBidLot;
@@ -224,6 +265,21 @@ async function performStockCheck(symbol, verboseCtx = null) {
 
 // --- HELPERS ---
 
+function isHoliday(day, month) {
+    // Simple TR Holiday List (Fixed Dates)
+    const holidays = [
+        "1-1",   // New Year
+        "23-4",  // Children's Day
+        "1-5",   // Labor Day
+        "19-5",  // Youth Day
+        "15-7",  // Democracy Day
+        "30-8",  // Victory Day
+        "29-10"  // Republic Day
+    ];
+    const key = `${day}-${month}`;
+    return holidays.includes(key);
+}
+
 async function sendGeneralReport(hour) {
     if (watchedStocks.length === 0) return;
 
@@ -231,24 +287,21 @@ async function sendGeneralReport(hour) {
 
     for (const stock of watchedStocks) {
         const data = stockData[stock];
-        if (data) {
-            const emoji = (data.lastLot < data.initialLot) ? '📉' : '✅';
-            report += `${emoji} #${stock}: ${fmt(data.lastLot)} Lot\n`;
+        if (data && data.prevLot) {
+            // Compare to Daily Avg if available
+            const trend = (data.dailyAvg > 0 && data.prevLot < data.dailyAvg) ? '📉' : '✅';
+            report += `${trend} #${stock}: ${fmt(data.prevLot)} Lot (Ort: ${fmt(data.dailyAvg)})\n`;
         } else {
             report += `⏳ #${stock}: Veri yok\n`;
         }
     }
-
-    report += `\n🤖 Takip Devam Ediyor...`;
     await broadcast(report);
 }
 
 async function broadcast(text) {
-    // 1. Send to Admin
     if (process.env.ADMIN_ID) {
         try { await bot.api.sendMessage(process.env.ADMIN_ID, text); } catch (e) { }
     }
-    // 2. Send to Channel (if configured)
     if (config.CHANNEL_ID) {
         try { await bot.api.sendMessage(config.CHANNEL_ID, text); } catch (e) { }
     }
@@ -256,13 +309,6 @@ async function broadcast(text) {
 
 async function syncStateToCloud(replyMsg) {
     await auth.saveAppState({ stocks: watchedStocks, isBotActive });
-    // Note: We don't save 'stockData' fully to keep message short, 
-    // or we could save it if needed. For now, restarting resets 'initialLot' reference 
-    // which might be wanted (reset baseline on restart) or unwanted.
-    // If we want persistence of baselines, we should add stockData to cloud save.
-
-    // Let's add partial persistence for robustness
-    // await auth.saveAppState({ stocks: watchedStocks, isBotActive, data: stockData });
 }
 
 function fmt(num) {
