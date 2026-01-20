@@ -178,7 +178,8 @@ async function mainLoop() {
             }
 
             // Wait between stocks to avoid spamming the target bot
-            await delay(15000);
+            // Reduced to 4s for faster cycle
+            await delay(4000);
         }
 
     } catch (e) {
