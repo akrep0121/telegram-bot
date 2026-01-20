@@ -132,12 +132,29 @@ async function saveAppState(state) {
 async function loadAppState() {
     if (!client.connected) await startUserbot();
     try {
-        const dbTag = "#SYSTEM_V3_DB";
-        const history = await client.getMessages("me", { search: dbTag, limit: 1 });
+        // Try V3 first
+        let dbTag = "#SYSTEM_V3_DB";
+        let history = await client.getMessages("me", { search: dbTag, limit: 1 });
+
         if (history && history.length > 0) {
             const lines = history[0].message.split('\n');
             return JSON.parse(lines[1]);
         }
+
+        // Fallback to V2 (Previous System)
+        console.log("[CLOUD] V3 DB not found, trying V2...");
+        dbTag = "#DATABASE_V2";
+        history = await client.getMessages("me", { search: dbTag, limit: 1 });
+
+        if (history && history.length > 0) {
+            const lines = history[0].message.split('\n');
+            const data = JSON.parse(lines[1]);
+            console.log("[CLOUD] Migrating V2 data:", data);
+            // Save immediately as V3 to complete migration
+            await saveAppState(data);
+            return data;
+        }
+
     } catch (e) {
         console.error("[CLOUD] Load failed (or empty):", e.message);
     }
