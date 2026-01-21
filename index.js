@@ -206,19 +206,57 @@ async function mainLoop() {
                 }
 
                 if (isAlert) {
-                    const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                        `📈 Hisse: ${stock}\n` +
-                        `🔴 Mevcut Lot: ${fmt(currentLot)}\n` +
-                        `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
-                        `📉 Düşüş Oranı: %${dropRatio.toFixed(1)}\n` +
-                        `🔍 Sebep: ${reason}\n` +
-                        `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(currentLot)}\n\n` +
-                        `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
+                    console.log(`[ALERT] Potential alert for ${stock}. Verifying...`);
 
-                    await broadcast(alertMsg);
+                    // VERIFICATION RETRY
+                    // Wait 5s and re-check to confirm it's not a glitch
+                    await delay(5000);
+                    const verifyLot = await performStockCheck(stock);
+
+                    if (verifyLot !== null) {
+                        // Check conditions again with NEW data
+                        // Does it still fail?
+                        // We use the SAME baseline as before for consistency
+                        let confirmed = false;
+
+                        if (reason.includes("Başlangıç")) {
+                            // Avg Check
+                            if (verifyLot < data.dailyAvg * 0.5) confirmed = true;
+                        } else {
+                            // Sudden Check
+                            // Need to check against the SAME prevLot we used
+                            if (verifyLot < data.prevLot * 0.7) confirmed = true;
+                        }
+
+                        if (confirmed) {
+                            // Valid Alert
+                            const finalRatio = ((baseline - verifyLot) / baseline) * 100;
+
+                            const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                                `📈 Hisse: ${stock}\n` +
+                                `🔴 Mevcut Lot: ${fmt(verifyLot)}\n` +
+                                `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
+                                `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
+                                `🔍 Sebep: ${reason}\n` +
+                                `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(verifyLot)}\n\n` +
+                                `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
+
+                            await broadcast(alertMsg);
+                            console.log(`[ALERT] Confirmed and Sent for ${stock}`);
+                        } else {
+                            console.log(`[ALERT] False alarm detected for ${stock}. Verification (${verifyLot}) passed.`);
+                            // Update currentLot to the verification one so we don't trigger again immediately on next loop
+                            // actually, code below updates prevLot to 'currentLot' (the first low one).
+                            // We should update it to 'verifyLot' (the corrected one).
+                            currentLot = verifyLot;
+                        }
+                    } else {
+                        console.log(`[ALERT] Verification failed (timeout/null) for ${stock}. Skipping alert.`);
+                    }
                 }
 
                 // Update Previous
+                // If it was a false alarm, we updated currentLot to verifyLot above.
                 data.prevLot = currentLot;
             }
 

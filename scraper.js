@@ -5,8 +5,9 @@ async function extractLotFromImage(imageBuffer, symbol) {
         console.log(`[OCR] ${symbol} - Starting OCR processing (Optimized)...`);
 
         // OPTIMIZATION: 
-        // 1. Use 'eng' only (faster than eng+tur).
-        // 2. Whitelist characters (0-9, punctuation).
+        // 1. Use 'eng' only.
+        // 2. Whitelist: Digits, separators, and specific headers.
+        // 3. PSM 6: Assume a single uniform block of text (improves table row alignment).
         const result = await Tesseract.recognize(
             imageBuffer,
             'eng',
@@ -17,7 +18,8 @@ async function extractLotFromImage(imageBuffer, symbol) {
                         console.log(`[OCR] ${symbol} Progress: ${Math.round(m.progress * 100)}%`);
                     }
                 },
-                tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlışSatış ' // Only allowed chars
+                tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlışSatış ', // Only allowed chars
+                tessedit_pageseg_mode: '6' // Assume single uniform block of text
             }
         );
 
@@ -45,12 +47,12 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
 
             // --- DATA PARSING --- 
-            // We are now inside the table.
-
-            // STRATEGY: 
-            // 1. Split by spaces.
-            // 2. Merge fragmented number parts.
-            // 3. Extract columns.
+            // Strategy: Finds the LARGEST integer in the row.
+            // Why? 
+            // 1. "Emir" column is usually small (orders).
+            // 2. "Price" column is small decimal.
+            // 3. "Lot" column (Ceiling) is usually the largest number.
+            // This bypasses issues where an artifact '1' at the start shifts the columns.
 
             const parts = clean.split(/\s+/);
             const mergedParts = [];
@@ -78,25 +80,33 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
             if (currentNum) mergedParts.push(currentNum);
 
-            // Filter non-numeric noise
-            const numericParts = mergedParts.filter(p => /\d/.test(p));
+            // Filter valid numbers
+            const validNumbers = [];
+            for (const p of mergedParts) {
+                // Must contain digits
+                if (!/\d/.test(p)) continue;
 
-            if (numericParts.length >= 2) {
-                // Col 0: Emir (Small integer)
-                // Col 1: Lot (Large integer)
+                // Remove non-digits to get raw value
+                const rawVal = p.replace(/\D/g, '');
+                const val = parseInt(rawVal);
+                if (!isNaN(val)) validNumbers.push(val);
+            }
 
-                const rawEmir = numericParts[0].replace(/\D/g, '');
-                const rawLot = numericParts[1].replace(/[.,]/g, '');
+            if (validNumbers.length >= 2) {
+                // Heuristic: The largest number in the row is the Lot.
+                // Exception: If the row is just noise? We rely on validNumbers >= 2.
+                // Usually [Emir, Lot, Price]
+                const maxVal = Math.max(...validNumbers);
 
-                const emirCount = parseInt(rawEmir);
-                const lotCount = parseInt(rawLot);
+                // Validation: Lot > 100
+                if (maxVal > 100) {
+                    // Double check: Is it reasonably larger than others?
+                    // Not strictly necessary but safe.
 
-                // Validation
-                if (!isNaN(emirCount) && !isNaN(lotCount) && lotCount > 100) {
-                    console.log(`[OCR] ${symbol} - Match: Emir=${emirCount}, Lot=${lotCount}`);
+                    console.log(`[OCR] ${symbol} - Match (Max Strategy): ${maxVal}`);
                     return {
                         symbol,
-                        topBidLot: lotCount
+                        topBidLot: maxVal
                     };
                 }
             }
