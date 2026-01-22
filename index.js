@@ -130,7 +130,7 @@ async function mainLoop() {
 
     // Time Interval Check
     const currentTimeVal = hour * 100 + minute; // e.g. 956 for 09:56
-    if (currentTimeVal < 956 || currentTimeVal >= 1800) return;
+    if (currentTimeVal < 956 || currentTimeVal > 1800) return;
 
     // Holiday Check
     if (isHoliday(dayOfMonth, month)) return;
