@@ -98,16 +98,22 @@ async function extractLotFromImage(imageBuffer, symbol) {
                 // Usually [Emir, Lot, Price]
                 const maxVal = Math.max(...validNumbers);
 
-                // Validation: Lot > 100
-                if (maxVal > 100) {
-                    // Double check: Is it reasonably larger than others?
-                    // Not strictly necessary but safe.
+                // Validation:
+                // 1. Lot must be significant > 100
+                // 2. Lot must be realistic for Turkish Stock Market (BIST).
+                //    Total shares of even the largest companies (e.g. THYAO, SASA) 
+                //    are in the billions. A single depth level showing 5 Billion+ is 
+                //    almost certainly an OCR artifact/merge error.
+                const MAX_REALISTIC_LOT = 5000000000; // 5 Billion
 
+                if (maxVal > 100 && maxVal < MAX_REALISTIC_LOT) {
                     console.log(`[OCR] ${symbol} - Match (Max Strategy): ${maxVal}`);
                     return {
                         symbol,
                         topBidLot: maxVal
                     };
+                } else if (maxVal >= MAX_REALISTIC_LOT) {
+                    console.log(`[OCR] ${symbol} - REJECTED: Number too large (${maxVal}). Likely OCR merge error.`);
                 }
             }
         }

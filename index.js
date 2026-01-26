@@ -162,101 +162,98 @@ async function mainLoop() {
 
                 const data = stockData[stock];
 
+                // --- 1. SURGE PROTECTION (Baseline Poisoning Prevention) ---
+                // If the new reading is massively higher than our established daily average,
+                // it's likely an OCR error that escaped the scraper's hard limit. 
+                // We refuse to update 'prevLot' or 'dailyAvg' with this "poisoned" data.
+                if (data.dailyAvg > 0 && currentLot > data.dailyAvg * 2) {
+                    console.log(`[LOGIC] ${stock} - REJECTED surge anomaly. New: ${currentLot} vs Avg: ${data.dailyAvg}. Baseline preserved.`);
+                    // Skip updating history with this glitch
+                    continue;
+                }
+
                 // DAILY RESET LOGIC
                 if (data.day !== dayOfMonth) {
-                    // New Day! Reset stats
                     console.log(`[LOGIC] New day for ${stock}. Resetting stats.`);
                     data.day = dayOfMonth;
                     data.samples = [];
                     data.dailyAvg = 0;
-                    data.prevLot = 0; // Reset prev so we don't alert on first read
+                    data.prevLot = 0;
                 }
 
                 // AVERAGE CALCULATION (First 10 samples)
                 if (data.samples.length < 10) {
                     data.samples.push(currentLot);
-                    // Recalculate Avg
                     const sum = data.samples.reduce((a, b) => a + b, 0);
                     data.dailyAvg = Math.floor(sum / data.samples.length);
-                    console.log(`[LOGIC] ${stock} Build Avg: ${data.dailyAvg} (Count: ${data.samples.length})`);
                 }
 
-                // ALERT LOGIC
-                // We check two conditions. If either triggers, we formulate the message.
-                // Priority: Check Average Drop first, then Sudden Drop.
-
+                // --- 2. ALERT LOGIC (Triple Verification) ---
                 let isAlert = false;
                 let baseline = 0;
-                let dropRatio = 0;
                 let reason = "";
 
-                // Condition 1: Drop 50% from Daily Average
+                // Average Check (50%)
                 if (data.dailyAvg > 0 && currentLot < data.dailyAvg * 0.5) {
                     isAlert = true;
                     baseline = data.dailyAvg;
-                    dropRatio = ((data.dailyAvg - currentLot) / data.dailyAvg) * 100;
-                    reason = `Başlangıç eşiği (${fmt(baseline)}) aşıldı! %${dropRatio.toFixed(1)} düşüş`;
+                    reason = `Başlangıç eşiği (${fmt(baseline)}) aşıldı!`;
                 }
-                // Condition 2: Drop 30% from Previous Read (Sudden Crash)
+                // Sudden Check (30%)
                 else if (data.prevLot > 0 && currentLot < data.prevLot * 0.7) {
                     isAlert = true;
                     baseline = data.prevLot;
-                    dropRatio = ((data.prevLot - currentLot) / data.prevLot) * 100;
-                    reason = `Ani çöküş! Önceki okumadan %${dropRatio.toFixed(1)} düşüş`;
+                    reason = `Ani çöküş! Önceki okumadan ciddi düşüş.`;
                 }
 
                 if (isAlert) {
-                    console.log(`[ALERT] Potential alert for ${stock}. Verifying...`);
+                    console.log(`[ALERT] Potential drop for ${stock}. Starting Triple-Verification...`);
 
-                    // VERIFICATION RETRY
-                    // Wait 5s and re-check to confirm it's not a glitch
-                    await delay(5000);
-                    const verifyLot = await performStockCheck(stock);
+                    let failCount = 1; // The current scan already failed
+                    const CHECK_INTERVAL = 7000; // 7s between retries
+                    const NEEDED_FAILS = 3;
 
-                    if (verifyLot !== null) {
-                        // Check conditions again with NEW data
-                        // Does it still fail?
-                        // We use the SAME baseline as before for consistency
-                        let confirmed = false;
+                    for (let attempt = 1; attempt < NEEDED_FAILS; attempt++) {
+                        await delay(CHECK_INTERVAL);
+                        const verifyLot = await performStockCheck(stock);
 
-                        if (reason.includes("Başlangıç")) {
-                            // Avg Check
-                            if (verifyLot < data.dailyAvg * 0.5) confirmed = true;
-                        } else {
-                            // Sudden Check
-                            // Need to check against the SAME prevLot we used
-                            if (verifyLot < data.prevLot * 0.7) confirmed = true;
+                        // Verification logic
+                        if (verifyLot !== null) {
+                            // Does it still meet alert criteria?
+                            const stillFailsAvg = baseline === data.dailyAvg && verifyLot < baseline * 0.5;
+                            const stillFailsSudden = baseline === data.prevLot && verifyLot < baseline * 0.7;
+
+                            if (stillFailsAvg || stillFailsSudden) {
+                                failCount++;
+                                console.log(`[ALERT] Verification ${attempt + 1}/${NEEDED_FAILS} CONFIRMED drop for ${stock}. (${fmt(verifyLot)})`);
+                            } else {
+                                console.log(`[ALERT] Verification ${attempt + 1}/${NEEDED_FAILS} REJECTED drop for ${stock}. Clean reading: ${fmt(verifyLot)}`);
+                                break;
+                            }
                         }
+                    }
 
-                        if (confirmed) {
-                            // Valid Alert
-                            const finalRatio = ((baseline - verifyLot) / baseline) * 100;
+                    if (failCount >= NEEDED_FAILS) {
+                        // TRIPLE CONFIRMED!
+                        // Fetch the final lot for the message
+                        const finalLot = await performStockCheck(stock) || currentLot;
+                        const finalRatio = ((baseline - finalLot) / baseline) * 100;
 
-                            const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                                `📈 Hisse: ${stock}\n` +
-                                `🔴 Mevcut Lot: ${fmt(verifyLot)}\n` +
-                                `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
-                                `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
-                                `🔍 Sebep: ${reason}\n` +
-                                `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(verifyLot)}\n\n` +
-                                `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
+                        const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                            `📈 Hisse: ${stock}\n` +
+                            `🔴 Mevcut Lot: ${fmt(finalLot)}\n` +
+                            `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
+                            `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
+                            `🔍 Sebep: ${reason}\n` +
+                            `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(finalLot)}\n\n` +
+                            `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
 
-                            await broadcast(alertMsg);
-                            console.log(`[ALERT] Confirmed and Sent for ${stock}`);
-                        } else {
-                            console.log(`[ALERT] False alarm detected for ${stock}. Verification (${verifyLot}) passed.`);
-                            // Update currentLot to the verification one so we don't trigger again immediately on next loop
-                            // actually, code below updates prevLot to 'currentLot' (the first low one).
-                            // We should update it to 'verifyLot' (the corrected one).
-                            currentLot = verifyLot;
-                        }
-                    } else {
-                        console.log(`[ALERT] Verification failed (timeout/null) for ${stock}. Skipping alert.`);
+                        await broadcast(alertMsg);
+                        console.log(`[ALERT] Triple-Confirmed and Broadcast for ${stock}`);
                     }
                 }
 
-                // Update Previous
-                // If it was a false alarm, we updated currentLot to verifyLot above.
+                // Update Previous only if it wasn't a rejected surge
                 data.prevLot = currentLot;
             }
 
