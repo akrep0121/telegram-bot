@@ -209,47 +209,31 @@ async function mainLoop() {
                 if (isAlert) {
                     console.log(`[ALERT] Potential drop for ${stock}. Starting Triple-Verification...`);
 
-                    let failCount = 1; // The current scan already failed
-                    const CHECK_INTERVAL = 7000; // 7s between retries
-                    const NEEDED_FAILS = 3;
+                    // FAST VERIFICATION
+                    const verifyLot = await performStockCheck(stock);
 
-                    for (let attempt = 1; attempt < NEEDED_FAILS; attempt++) {
-                        await delay(CHECK_INTERVAL);
-                        const verifyLot = await performStockCheck(stock);
+                    if (verifyLot !== null) {
+                        let confirmed = false;
+                        if (baseline === data.dailyAvg && verifyLot < baseline * 0.5) confirmed = true;
+                        else if (baseline === data.prevLot && verifyLot < baseline * 0.7) confirmed = true;
 
-                        // Verification logic
-                        if (verifyLot !== null) {
-                            // Does it still meet alert criteria?
-                            const stillFailsAvg = baseline === data.dailyAvg && verifyLot < baseline * 0.5;
-                            const stillFailsSudden = baseline === data.prevLot && verifyLot < baseline * 0.7;
+                        if (confirmed) {
+                            const finalRatio = ((baseline - verifyLot) / baseline) * 100;
+                            const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                                `📈 Hisse: ${stock}\n` +
+                                `🔴 Mevcut Lot: ${fmt(verifyLot)}\n` +
+                                `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
+                                `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
+                                `🔍 Sebep: ${reason}\n` +
+                                `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(verifyLot)}\n\n` +
+                                `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
 
-                            if (stillFailsAvg || stillFailsSudden) {
-                                failCount++;
-                                console.log(`[ALERT] Verification ${attempt + 1}/${NEEDED_FAILS} CONFIRMED drop for ${stock}. (${fmt(verifyLot)})`);
-                            } else {
-                                console.log(`[ALERT] Verification ${attempt + 1}/${NEEDED_FAILS} REJECTED drop for ${stock}. Clean reading: ${fmt(verifyLot)}`);
-                                break;
-                            }
+                            await broadcast(alertMsg);
+                            console.log(`[ALERT] Fast-Confirmed and Sent for ${stock}`);
+                        } else {
+                            console.log(`[ALERT] False alarm rejected for ${stock}. Verification: ${fmt(verifyLot)}`);
+                            currentLot = verifyLot;
                         }
-                    }
-
-                    if (failCount >= NEEDED_FAILS) {
-                        // TRIPLE CONFIRMED!
-                        // Fetch the final lot for the message
-                        const finalLot = await performStockCheck(stock) || currentLot;
-                        const finalRatio = ((baseline - finalLot) / baseline) * 100;
-
-                        const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                            `📈 Hisse: ${stock}\n` +
-                            `🔴 Mevcut Lot: ${fmt(finalLot)}\n` +
-                            `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
-                            `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
-                            `🔍 Sebep: ${reason}\n` +
-                            `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(finalLot)}\n\n` +
-                            `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
-
-                        await broadcast(alertMsg);
-                        console.log(`[ALERT] Triple-Confirmed and Broadcast for ${stock}`);
                     }
                 }
 
