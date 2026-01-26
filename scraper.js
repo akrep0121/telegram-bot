@@ -1,25 +1,35 @@
 const Tesseract = require('tesseract.js');
+const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Starting OCR processing (Optimized)...`);
+        console.log(`[OCR] ${symbol} - Pre-processing image with Sharp...`);
 
-        // OPTIMIZATION: 
-        // 1. Use 'eng' only.
-        // 2. Whitelist: Digits, separators, and specific headers.
-        // 3. PSM 6: Assume a single uniform block of text (improves table row alignment).
+        // IMAGE PRE-PROCESSING (V2)
+        // 1. Grayscale: Removes color noise.
+        // 2. Sharpen: Makes edges of numbers crisper.
+        // 3. Threshold: Converts to high-contrast black/white (removes ghosting).
+        // 4. Resize: Enlarges text slightly for better Tesseract detection.
+        const processedBuffer = await sharp(imageBuffer)
+            .grayscale()
+            .sharpen()
+            .threshold(140) // Adjust if text becomes too thin/thick
+            .resize({ width: 800 }) // Upscale to standard width for better OCR
+            .toBuffer();
+
+        console.log(`[OCR] ${symbol} - Starting OCR processing (Optimized + Pre-processed)...`);
+
         const result = await Tesseract.recognize(
-            imageBuffer,
+            processedBuffer,
             'eng',
             {
                 logger: m => {
-                    // Reduce log frequency
                     if (m.status === 'recognizing text' && (Math.round(m.progress * 100) % 50 === 0)) {
                         console.log(`[OCR] ${symbol} Progress: ${Math.round(m.progress * 100)}%`);
                     }
                 },
-                tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlışSatış ', // Only allowed chars
-                tessedit_pageseg_mode: '6' // Assume single uniform block of text
+                tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlışSatış ',
+                tessedit_pageseg_mode: '6'
             }
         );
 
