@@ -188,7 +188,7 @@ async function mainLoop() {
                     data.dailyAvg = Math.floor(sum / data.samples.length);
                 }
 
-                // --- 2. ALERT LOGIC (Triple Verification) ---
+                // --- 2. ALERT LOGIC (Multi-Level Verification) ---
                 let isAlert = false;
                 let baseline = 0;
                 let reason = "";
@@ -207,33 +207,34 @@ async function mainLoop() {
                 }
 
                 if (isAlert) {
-                    console.log(`[ALERT] Potential drop for ${stock}. Starting Triple-Verification...`);
+                    console.log(`[ALERT] Potential drop for ${stock} (${fmt(currentLot)}). Fast-verifying...`);
 
-                    // FAST VERIFICATION
-                    const verifyLot = await performStockCheck(stock);
+                    // HIGH-SPEED VERIFICATION: Just one more rapid check
+                    const v1 = await performStockCheck(stock);
 
-                    if (verifyLot !== null) {
-                        let confirmed = false;
-                        if (baseline === data.dailyAvg && verifyLot < baseline * 0.5) confirmed = true;
-                        else if (baseline === data.prevLot && verifyLot < baseline * 0.7) confirmed = true;
+                    let confirmed = false;
+                    if (v1 !== null) {
+                        if (baseline === data.dailyAvg && v1 < baseline * 0.5) confirmed = true;
+                        else if (baseline === data.prevLot && v1 < baseline * 0.7) confirmed = true;
+                    }
 
-                        if (confirmed) {
-                            const finalRatio = ((baseline - verifyLot) / baseline) * 100;
-                            const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
-                                `📈 Hisse: ${stock}\n` +
-                                `🔴 Mevcut Lot: ${fmt(verifyLot)}\n` +
-                                `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
-                                `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
-                                `🔍 Sebep: ${reason}\n` +
-                                `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(verifyLot)}\n\n` +
-                                `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
+                    if (confirmed && v1 !== null) {
+                        const finalRatio = ((baseline - v1) / baseline) * 100;
+                        const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
+                            `📈 Hisse: ${stock}\n` +
+                            `🔴 Mevcut Lot: ${fmt(v1)}\n` +
+                            `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
+                            `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
+                            `🔍 Sebep: ${reason}\n` +
+                            `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(v1)}\n\n` +
+                            `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
 
-                            await broadcast(alertMsg);
-                            console.log(`[ALERT] Fast-Confirmed and Sent for ${stock}`);
-                        } else {
-                            console.log(`[ALERT] False alarm rejected for ${stock}. Verification: ${fmt(verifyLot)}`);
-                            currentLot = verifyLot;
-                        }
+                        await broadcast(alertMsg);
+                        console.log(`[ALERT] High-Speed Confirmed for ${stock}`);
+                        currentLot = v1;
+                    } else {
+                        console.log(`[ALERT] False alarm rejected for ${stock}. Fast recovery.`);
+                        currentLot = data.prevLot;
                     }
                 }
 

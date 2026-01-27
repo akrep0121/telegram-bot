@@ -3,21 +3,26 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Pre-processing image with Sharp...`);
+        console.log(`[OCR] ${symbol} - Pre-processing image (V4 Green ROI)...`);
 
-        // IMAGE PRE-PROCESSING (V2)
-        // 1. Grayscale: Removes color noise.
-        // 2. Sharpen: Makes edges of numbers crisper.
-        // 3. Threshold: Converts to high-contrast black/white (removes ghosting).
-        // 4. Resize: Enlarges text slightly for better Tesseract detection.
-        const processedBuffer = await sharp(imageBuffer)
-            .grayscale()
+        // IMAGE PRE-PROCESSING (V4 - Green Channel + ROI)
+        // 1. Extract Green Channel: Kills gray watermarks effectively.
+        const baseProcessed = await sharp(imageBuffer)
+            .extractChannel('green')
+            .negate() // Black text on White
+            .threshold(160)
             .sharpen()
-            .threshold(140) // Adjust if text becomes too thin/thick
-            .resize({ width: 800 }) // Upscale to standard width for better OCR
             .toBuffer();
 
-        console.log(`[OCR] ${symbol} - Starting OCR processing (Optimized + Pre-processed)...`);
+        // ROI CROP: We focus on the left-side depth table (Emir, Adet, Alış)
+        const metadata = await sharp(baseProcessed).metadata();
+        const cropWidth = Math.floor(metadata.width * 0.55); // Left half
+        const cropHeight = Math.floor(metadata.height * 0.85); // Skip bottom noise
+
+        const processedBuffer = await sharp(baseProcessed)
+            .extract({ left: 0, top: 0, width: cropWidth, height: cropHeight })
+            .resize({ width: 1000 }) // Upscale
+            .toBuffer();
 
         const result = await Tesseract.recognize(
             processedBuffer,
@@ -36,51 +41,30 @@ async function extractLotFromImage(imageBuffer, symbol) {
         const text = result.data.text;
         const lines = text.split('\n');
         let tableStarted = false;
+        let candidates = [];
 
         for (const line of lines) {
             const clean = line.trim();
             if (!clean || clean.length < 5) continue;
 
-            // CHECK FOR TABLE HEADER
-            // The table header line usually contains "Emir" and "Adet"
             if (!tableStarted) {
-                // If we see "Emir" and "Adet", we assume the NEXT lines are the data.
-                // We use a loose check because OCR might see "Emir" as "Enir" etc. if not perfect,
-                // but our whitelist ensures we mostly get these chars.
                 const lower = clean.toLowerCase();
-                if (lower.includes('emir') || lower.includes('adet')) {
-                    console.log(`[OCR] ${symbol} - Table header found. Parsing subsequent lines...`);
+                if (lower.includes('emir') || lower.includes('adet') || lower.includes('aliş')) {
                     tableStarted = true;
                 }
-                // Skip everything before the table header (including the top info row with total volume)
                 continue;
             }
 
-            // --- DATA PARSING --- 
-            // Strategy: Finds the LARGEST integer in the row.
-            // Why? 
-            // 1. "Emir" column is usually small (orders).
-            // 2. "Price" column is small decimal.
-            // 3. "Lot" column (Ceiling) is usually the largest number.
-            // This bypasses issues where an artifact '1' at the start shifts the columns.
-
             const parts = clean.split(/\s+/);
             const mergedParts = [];
-
-            // Smart Merge Loop
             let currentNum = "";
             for (let i = 0; i < parts.length; i++) {
                 const part = parts[i];
-
                 if (currentNum === "") {
                     currentNum = part;
                 } else {
-                    const endsWithSep = /[.,]$/.test(currentNum);
-                    const startsWithSep = /^[.,]/.test(part);
-                    const isBlock = /^\d{3}$/.test(part);
-                    const isNum = /^\d+$/.test(currentNum);
-
-                    if (endsWithSep || startsWithSep || (isNum && isBlock)) {
+                    const endsWithSep = /[.,]$/.test(currentNum) || /^[.,]/.test(part);
+                    if (endsWithSep || /^\d{3}$/.test(part)) {
                         currentNum += part;
                     } else {
                         mergedParts.push(currentNum);
@@ -90,45 +74,37 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
             if (currentNum) mergedParts.push(currentNum);
 
-            // Filter valid numbers
-            const validNumbers = [];
-            for (const p of mergedParts) {
-                // Must contain digits
-                if (!/\d/.test(p)) continue;
-
-                // Remove non-digits to get raw value
-                const rawVal = p.replace(/\D/g, '');
-                const val = parseInt(rawVal);
-                if (!isNaN(val)) validNumbers.push(val);
+            const rowStrNums = mergedParts.filter(p => /\d/.test(p));
+            if (rowStrNums.length >= 2) {
+                candidates.push(rowStrNums);
+                if (candidates.length >= 8) break;
             }
+        }
 
-            if (validNumbers.length >= 2) {
-                // Heuristic: The largest number in the row is the Lot.
-                // Exception: If the row is just noise? We rely on validNumbers >= 2.
-                // Usually [Emir, Lot, Price]
-                const maxVal = Math.max(...validNumbers);
+        if (candidates.length === 0) return null;
 
-                // Validation:
-                // 1. Lot must be significant > 100
-                // 2. Lot must be realistic for Turkish Stock Market (BIST).
-                //    Total shares of even the largest companies (e.g. THYAO, SASA) 
-                //    are in the billions. A single depth level showing 5 Billion+ is 
-                //    almost certainly an OCR artifact/merge error.
-                const MAX_REALISTIC_LOT = 5000000000; // 5 Billion
+        let maxPrice = -1;
+        let bestLot = null;
 
-                if (maxVal > 100 && maxVal < MAX_REALISTIC_LOT) {
-                    console.log(`[OCR] ${symbol} - Match (Max Strategy): ${maxVal}`);
-                    return {
-                        symbol,
-                        topBidLot: maxVal
-                    };
-                } else if (maxVal >= MAX_REALISTIC_LOT) {
-                    console.log(`[OCR] ${symbol} - REJECTED: Number too large (${maxVal}). Likely OCR merge error.`);
+        for (const row of candidates) {
+            const priceRaw = row[row.length - 1].replace(/[^\d.,]/g, '').replace(',', '.');
+            const priceVal = parseFloat(priceRaw);
+            let lotIdx = row.length === 3 ? 1 : 0;
+            const lotRaw = row[lotIdx].replace(/\D/g, '');
+            const lotVal = parseInt(lotRaw);
+
+            if (!isNaN(priceVal) && priceVal > maxPrice && priceVal < 50000) {
+                maxPrice = priceVal;
+                if (!isNaN(lotVal) && lotVal > 100 && lotVal < 5000000000) {
+                    bestLot = lotVal;
                 }
             }
         }
 
-        console.log(`[OCR] ${symbol} - No valid Lot data found in text.`);
+        if (bestLot !== null) {
+            console.log(`[OCR] ${symbol} - V4 Match: Lot=${bestLot} (Price: ${maxPrice})`);
+            return { symbol, topBidLot: bestLot };
+        }
         return null;
 
     } catch (e) {
