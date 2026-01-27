@@ -3,30 +3,31 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Pre-processing image (V4 Green ROI)...`);
+        console.log(`[OCR] ${symbol} - Pre-processing (V4.1: Corrected Green Filter)...`);
 
-        // IMAGE PRE-PROCESSING (V4 - Green Channel + ROI)
-        // 1. Extract Green Channel: Kills gray watermarks effectively.
-        const baseProcessed = await sharp(imageBuffer)
+        // IMAGE PRE-PROCESSING (V4.1)
+        // Correct Order: 1. Extract Green 2. Threshold (High) 3. Negate
+        const processedBuffer = await sharp(imageBuffer)
             .extractChannel('green')
-            .negate() // Black text on White
-            .threshold(160)
-            .sharpen()
+            .threshold(200) // Keep ONLY the bright green text parts
+            .negate() // Flip to Black text on White background
+            .resize({ width: 1200 }) // High upscale for better digits
             .toBuffer();
 
-        // ROI CROP: We focus on the left-side depth table (Emir, Adet, Alış)
-        const metadata = await sharp(baseProcessed).metadata();
-        const cropWidth = Math.floor(metadata.width * 0.55); // Left half
-        const cropHeight = Math.floor(metadata.height * 0.85); // Skip bottom noise
+        // ROI CROP: Focusing on the primary data region
+        const metadata = await sharp(processedBuffer).metadata();
+        const cropWidth = Math.floor(metadata.width * 0.58); // Capture Emir, Adet, Alış
+        const cropHeight = Math.floor(metadata.height * 0.88);
 
-        const processedBuffer = await sharp(baseProcessed)
+        const finalBuffer = await sharp(processedBuffer)
             .extract({ left: 0, top: 0, width: cropWidth, height: cropHeight })
-            .resize({ width: 1000 }) // Upscale
             .toBuffer();
+
+        console.log(`[OCR] ${symbol} - Starting Multi-Lang OCR (tur+eng)...`);
 
         const result = await Tesseract.recognize(
-            processedBuffer,
-            'eng',
+            finalBuffer,
+            'tur+eng', // Better support for Alış, Satış, Adet
             {
                 logger: m => {
                     if (m.status === 'recognizing text' && (Math.round(m.progress * 100) % 50 === 0)) {
@@ -40,6 +41,11 @@ async function extractLotFromImage(imageBuffer, symbol) {
 
         const text = result.data.text;
         const lines = text.split('\n');
+
+        // --- DEBUG LOGGING ---
+        console.log(`[OCR] ${symbol} - RAW TEXT START (First 300 chars):`);
+        console.log(text.slice(0, 300).replace(/\n/g, ' [NL] '));
+
         let tableStarted = false;
         let candidates = [];
 
@@ -49,8 +55,10 @@ async function extractLotFromImage(imageBuffer, symbol) {
 
             if (!tableStarted) {
                 const lower = clean.toLowerCase();
-                if (lower.includes('emir') || lower.includes('adet') || lower.includes('aliş')) {
+                // Loose matching for headers
+                if (lower.includes('emir') || lower.includes('adet') || lower.includes('ali') || lower.includes('aliş')) {
                     tableStarted = true;
+                    console.log(`[OCR] ${symbol} - Table detected!`);
                 }
                 continue;
             }
@@ -64,7 +72,8 @@ async function extractLotFromImage(imageBuffer, symbol) {
                     currentNum = part;
                 } else {
                     const endsWithSep = /[.,]$/.test(currentNum) || /^[.,]/.test(part);
-                    if (endsWithSep || /^\d{3}$/.test(part)) {
+                    const isBlock = /^\d{3}$/.test(part);
+                    if (endsWithSep || isBlock) {
                         currentNum += part;
                     } else {
                         mergedParts.push(currentNum);
@@ -81,7 +90,10 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
         }
 
-        if (candidates.length === 0) return null;
+        if (candidates.length === 0) {
+            console.log(`[OCR] ${symbol} - No candidates found. Check RAW TEXT above.`);
+            return null;
+        }
 
         let maxPrice = -1;
         let bestLot = null;
@@ -89,11 +101,11 @@ async function extractLotFromImage(imageBuffer, symbol) {
         for (const row of candidates) {
             const priceRaw = row[row.length - 1].replace(/[^\d.,]/g, '').replace(',', '.');
             const priceVal = parseFloat(priceRaw);
-            let lotIdx = row.length === 3 ? 1 : 0;
+            let lotIdx = row.length >= 3 ? 1 : 0;
             const lotRaw = row[lotIdx].replace(/\D/g, '');
             const lotVal = parseInt(lotRaw);
 
-            if (!isNaN(priceVal) && priceVal > maxPrice && priceVal < 50000) {
+            if (!isNaN(priceVal) && priceVal > maxPrice && priceVal < 100000) {
                 maxPrice = priceVal;
                 if (!isNaN(lotVal) && lotVal > 100 && lotVal < 5000000000) {
                     bestLot = lotVal;
@@ -102,9 +114,11 @@ async function extractLotFromImage(imageBuffer, symbol) {
         }
 
         if (bestLot !== null) {
-            console.log(`[OCR] ${symbol} - V4 Match: Lot=${bestLot} (Price: ${maxPrice})`);
+            console.log(`[OCR] ${symbol} - V4.1 Match: Lot=${bestLot} (Price: ${maxPrice})`);
             return { symbol, topBidLot: bestLot };
         }
+
+        console.log(`[OCR] ${symbol} - Decision Logic failed to anchor to a price.`);
         return null;
 
     } catch (e) {
