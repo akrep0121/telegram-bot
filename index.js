@@ -348,8 +348,22 @@ const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
     console.log(`Loaded: ${watchedStocks.length} stocks. Active: ${isBotActive}`);
 
-    // Start Bot
-    bot.start({ onStart: (info) => console.log(`@${info.username} started!`) });
+    // Start Bot (with conflict protection)
+    bot.catch((err) => {
+        const ctx = err.ctx;
+        console.error(`[ERROR] Grammy at ${ctx.update.update_id}:`, err.error);
+        if (err.error.description && err.error.description.includes('Conflict')) {
+            console.warn("⚠️ Conflict detected! Another instance is likely running.");
+        }
+    });
+
+    console.log("Waiting 3s for session cleanup...");
+    setTimeout(() => {
+        bot.start({
+            drop_pending_updates: true,
+            onStart: (info) => console.log(`@${info.username} started! (Conflict-Free Mode)`)
+        });
+    }, 3000);
 
     // Scheduler (Every 30s)
     setInterval(mainLoop, 30000);
