@@ -3,7 +3,7 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Single-Pass Smart OCR (V4.3)...`);
+        console.log(`[OCR] ${symbol} - Single-Pass Smart OCR (V4.4)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
 
@@ -20,7 +20,7 @@ async function extractLotFromImage(imageBuffer, symbol) {
         console.log(`[OCR] ${symbol} - Starting Tesseract Pass...`);
         const result = await Tesseract.recognize(processedBuffer, 'tur+eng', {
             tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlış ',
-            tessedit_pageseg_mode: '1' // Automatic page segmentation (better for whole images)
+            tessedit_pageseg_mode: '6' // Sparse text/table mode
         });
 
         const fullText = result.data.text;
@@ -32,12 +32,12 @@ async function extractLotFromImage(imageBuffer, symbol) {
         let candidates = [];
 
         // 1. Find the CEILING PRICE in the top part (Heading)
-        for (let i = 0; i < Math.min(lines.length, 10); i++) {
+        for (let i = 0; i < Math.min(lines.length, 12); i++) {
             const line = lines[i].replace(/[^\d. ]/g, '');
             const matches = line.match(/(\d+\.\d{2})/);
             if (matches) {
                 targetPriceInt = Math.round(parseFloat(matches[1]) * 100);
-                console.log(`[OCR] ${symbol} - Target Price Identified: ${matches[1]} (${targetPriceInt})`);
+                console.log(`[OCR] ${symbol} - Target Price Identified: ${matches[1]}`);
                 break;
             }
         }
@@ -55,7 +55,7 @@ async function extractLotFromImage(imageBuffer, symbol) {
                 continue;
             }
 
-            // Numeric Parsing
+            // Numeric Parsing with Fragment Merging
             const parts = clean.split(/\s+/);
             const rowNums = [];
             for (const p of parts) {
@@ -64,10 +64,22 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
 
             if (rowNums.length >= 2) {
-                const price = rowNums[rowNums.length - 1];
-                const lot = rowNums.length >= 3 ? rowNums[1] : rowNums[0];
-                candidates.push({ lot, price });
-                if (candidates.length >= 10) break;
+                const price = rowNums[rowNums.length - 1]; // Last part is Price
+                let lot = 0;
+
+                if (rowNums.length >= 3) {
+                    // Middle-Merging: Emir is [0], Price is [last]. Everything else is Lot.
+                    const lotParts = rowNums.slice(1, -1);
+                    lot = parseInt(lotParts.join(''));
+                    console.log(`[OCR] ${symbol} - Merged Lot Fragments: ${lotParts.join(' + ')} = ${lot}`);
+                } else {
+                    lot = rowNums[0];
+                }
+
+                if (lot > 10) {
+                    candidates.push({ lot, price });
+                }
+                if (candidates.length >= 12) break;
             }
         }
 
@@ -78,18 +90,18 @@ async function extractLotFromImage(imageBuffer, symbol) {
 
         // 3. SELECTION LOGIC
         let bestLot = null;
-        let minDiff = 99999;
+        let minDiff = 888888;
 
         for (let i = 0; i < candidates.length; i++) {
             const c = candidates[i];
 
-            // Primary Match: Large first row (Tavan)
-            if (i === 0 && c.lot > 200000) {
+            // Priority 1: Large first row (Tavan Detection)
+            if (i === 0 && c.lot > 250000) {
                 console.log(`[OCR] ${symbol} - Match (Dominant First Row): Lot=${c.lot}`);
                 return { symbol, topBidLot: c.lot };
             }
 
-            // Secondary Match: Price Anchor
+            // Priority 2: Price Anchor Match
             if (targetPriceInt) {
                 const diff = Math.abs(c.price - targetPriceInt);
                 if (diff < minDiff) {
@@ -97,12 +109,12 @@ async function extractLotFromImage(imageBuffer, symbol) {
                     bestLot = c.lot;
                 }
             } else if (i === 0) {
-                bestLot = c.lot; // Failover
+                bestLot = c.lot;
             }
         }
 
         if (bestLot !== null) {
-            console.log(`[OCR] ${symbol} - Match (Anchored): Lot=${bestLot}`);
+            console.log(`[OCR] ${symbol} - Match (Final Selection): Lot=${bestLot}`);
             return { symbol, topBidLot: bestLot };
         }
         return null;
