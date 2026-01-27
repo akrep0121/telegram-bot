@@ -7,14 +7,15 @@ async function extractLotFromImage(imageBuffer, symbol) {
 
         const metadata = await sharp(imageBuffer).metadata();
 
-        // 1. HIGH-PRECISION PRE-PROCESSING (Single Pass)
-        // Optimized to make digits pop while killing watermarks
+        // 1. HIGH-PRECISION PRE-PROCESSING (V4.5)
+        // Ultra-high resolution and contrast to capture every single digit
         const processedBuffer = await sharp(imageBuffer)
-            .modulate({ brightness: 1.2, contrast: 1.5 })
+            .modulate({ brightness: 1.2, contrast: 1.7 }) // Stronger contrast
             .extractChannel('green')
-            .threshold(190) // Balanced: high enough to kill grays, low enough to keep thin digits
-            .negate()
-            .resize({ width: 1400 }) // Upscale for tiny numbers
+            .threshold(180) // Lowered slightly to preserve thin digit parts
+            .negate() // IMPORTANT: Black text on white background
+            .sharpen() // Define edges
+            .resize({ width: 2800 }) // Ultra-high resolution for Tesseract
             .toBuffer();
 
         console.log(`[OCR] ${symbol} - Starting Tesseract Pass...`);
