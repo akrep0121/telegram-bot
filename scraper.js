@@ -3,47 +3,54 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Single-Pass Smart OCR (V4.4)...`);
+        console.log(`[OCR] ${symbol} - Turbo ROI Speed Mode (V5.0)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
+        const w = metadata.width;
+        const h = metadata.height;
 
-        // 1. HIGH-PRECISION PRE-PROCESSING (V4.5)
-        // Ultra-high resolution and contrast to capture every single digit
+        // --- STAGE 1: TURBO ROI PRE-PROCESSING ---
+        // We only crop the top-left quadrant (Top 35% height, 60% width)
+        // This covers Stock Name, Price, and the Top Bids (Tavan Zone).
         const processedBuffer = await sharp(imageBuffer)
-            .modulate({ brightness: 1.2, contrast: 1.7 }) // Stronger contrast
+            .extract({
+                left: 0,
+                top: 0,
+                width: Math.floor(w * 0.60),
+                height: Math.floor(h * 0.35)
+            })
+            .modulate({ brightness: 1.1, contrast: 1.6 })
             .extractChannel('green')
-            .threshold(180) // Lowered slightly to preserve thin digit parts
-            .negate() // IMPORTANT: Black text on white background
-            .sharpen() // Define edges
-            .resize({ width: 2800 }) // Ultra-high resolution for Tesseract
+            .threshold(180)
+            .negate()
+            .resize({ width: 2000 }) // Balanced resolution for speed
             .toBuffer();
 
-        console.log(`[OCR] ${symbol} - Starting Tesseract Pass...`);
+        console.log(`[OCR] ${symbol} - Starting Fast Tesseract Pass...`);
         const result = await Tesseract.recognize(processedBuffer, 'tur+eng', {
-            tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlış ',
-            tessedit_pageseg_mode: '6' // Sparse text/table mode
+            tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlışUCAYM ', // Added symbol bias
+            tessedit_pageseg_mode: '6' // Sparse table mode
         });
 
-        const fullText = result.data.text;
-        const lines = fullText.split('\n');
+        const lines = result.data.text.split('\n');
 
         // --- DATA ANALYSIS ---
         let targetPriceInt = null;
         let tableStarted = false;
         let candidates = [];
 
-        // 1. Find the CEILING PRICE in the top part (Heading)
-        for (let i = 0; i < Math.min(lines.length, 12); i++) {
+        // 1. Identify Target Price from Heading
+        for (let i = 0; i < Math.min(lines.length, 6); i++) {
             const line = lines[i].replace(/[^\d. ]/g, '');
             const matches = line.match(/(\d+\.\d{2})/);
             if (matches) {
                 targetPriceInt = Math.round(parseFloat(matches[1]) * 100);
-                console.log(`[OCR] ${symbol} - Target Price Identified: ${matches[1]}`);
+                console.log(`[OCR] ${symbol} - Target: ${matches[1]}`);
                 break;
             }
         }
 
-        // 2. Find and Parse the Table
+        // 2. Parse Rows (Only first few rows in our mini-crop)
         for (const line of lines) {
             const clean = line.trim();
             if (clean.length < 5) continue;
@@ -56,7 +63,7 @@ async function extractLotFromImage(imageBuffer, symbol) {
                 continue;
             }
 
-            // Numeric Parsing with Fragment Merging
+            // Numeric Parsing with Fragment Merging (From V4.4)
             const parts = clean.split(/\s+/);
             const rowNums = [];
             for (const p of parts) {
@@ -65,14 +72,11 @@ async function extractLotFromImage(imageBuffer, symbol) {
             }
 
             if (rowNums.length >= 2) {
-                const price = rowNums[rowNums.length - 1]; // Last part is Price
+                const price = rowNums[rowNums.length - 1];
                 let lot = 0;
-
                 if (rowNums.length >= 3) {
-                    // Middle-Merging: Emir is [0], Price is [last]. Everything else is Lot.
                     const lotParts = rowNums.slice(1, -1);
                     lot = parseInt(lotParts.join(''));
-                    console.log(`[OCR] ${symbol} - Merged Lot Fragments: ${lotParts.join(' + ')} = ${lot}`);
                 } else {
                     lot = rowNums[0];
                 }
@@ -80,12 +84,11 @@ async function extractLotFromImage(imageBuffer, symbol) {
                 if (lot > 10) {
                     candidates.push({ lot, price });
                 }
-                if (candidates.length >= 12) break;
             }
         }
 
         if (candidates.length === 0) {
-            console.log(`[OCR] ${symbol} - Failed to detect data rows.`);
+            console.log(`[OCR] ${symbol} - Mini-ROI failed to detect rows.`);
             return null;
         }
 
@@ -96,13 +99,13 @@ async function extractLotFromImage(imageBuffer, symbol) {
         for (let i = 0; i < candidates.length; i++) {
             const c = candidates[i];
 
-            // Priority 1: Large first row (Tavan Detection)
-            if (i === 0 && c.lot > 250000) {
-                console.log(`[OCR] ${symbol} - Match (Dominant First Row): Lot=${c.lot}`);
+            // Priority 1: Large top row
+            if (i === 0 && c.lot > 100000) {
+                console.log(`[OCR] ${symbol} - Turbo Match (Row 1): Lot=${c.lot}`);
                 return { symbol, topBidLot: c.lot };
             }
 
-            // Priority 2: Price Anchor Match
+            // Priority 2: Price Matching
             if (targetPriceInt) {
                 const diff = Math.abs(c.price - targetPriceInt);
                 if (diff < minDiff) {
@@ -115,13 +118,13 @@ async function extractLotFromImage(imageBuffer, symbol) {
         }
 
         if (bestLot !== null) {
-            console.log(`[OCR] ${symbol} - Match (Final Selection): Lot=${bestLot}`);
+            console.log(`[OCR] ${symbol} - Turbo Match (Anchored): Lot=${bestLot}`);
             return { symbol, topBidLot: bestLot };
         }
         return null;
 
     } catch (e) {
-        console.error(`[OCR] Error processing image for ${symbol}:`, e.message);
+        console.error(`[OCR] Turbo Error for ${symbol}:`, e.message);
         return null;
     }
 }
