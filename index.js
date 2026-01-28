@@ -152,7 +152,7 @@ async function mainLoop() {
         for (const stock of watchedStocks) {
             if (!isBotActive) break;
 
-            const currentLot = await performStockCheck(stock);
+            let currentLot = await performStockCheck(stock);
 
             if (currentLot !== null) {
                 // Initialize Data Structure if missing
@@ -241,10 +241,13 @@ async function mainLoop() {
                             `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
 
                         await broadcast(alertMsg);
-                        console.log(`[ALERT] High-Speed Confirmed for ${stock}`);
+                        console.log(`[ALERT] High-Speed Confirmed for ${stock}. New Baseline candidate: ${fmt(v1)}`);
                         currentLot = v1;
+                    } else if (v1 !== null) {
+                        console.log(`[ALERT] False alarm rejected for ${stock}. Capturing valid reading: ${fmt(v1)}`);
+                        currentLot = v1; // Set to the high reading to allow baseline calibration
                     } else {
-                        console.log(`[ALERT] False alarm rejected for ${stock}. Fast recovery.`);
+                        console.log(`[ALERT] Verification failed (null). Keeping previous state.`);
                         currentLot = data.prevLot;
                     }
                 }

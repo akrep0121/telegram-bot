@@ -3,7 +3,7 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Turbo ROI Speed Mode (V5.0)...`);
+        console.log(`[OCR] ${symbol} - Turbo ROI Precision Mode (V5.1)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
         const w = metadata.width;
