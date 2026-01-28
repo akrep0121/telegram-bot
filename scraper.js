@@ -9,21 +9,21 @@ async function extractLotFromImage(imageBuffer, symbol) {
         const w = metadata.width;
         const h = metadata.height;
 
-        // --- STAGE 1: TURBO ROI PRE-PROCESSING ---
-        // We only crop the top-left quadrant (Top 35% height, 60% width)
-        // This covers Stock Name, Price, and the Top Bids (Tavan Zone).
+        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.1 Safe Mode) ---
+        // Wider ROI (72% width) to ensure leading digits are never clipped.
+        // Resizing EARLY (before threshold) preserves smoother numeric shapes.
         const processedBuffer = await sharp(imageBuffer)
             .extract({
                 left: 0,
                 top: 0,
-                width: Math.floor(w * 0.60),
+                width: Math.floor(w * 0.72), // Increased from 60% for safety
                 height: Math.floor(h * 0.35)
             })
-            .modulate({ brightness: 1.1, contrast: 1.6 })
+            .resize({ width: 2200 }) // Upscale early for character fidelity
+            .modulate({ brightness: 1.1, contrast: 1.8 }) // Crisp contrast
             .extractChannel('green')
-            .threshold(180)
+            .threshold(175) // Slightly lower to keep thin strokes
             .negate()
-            .resize({ width: 2000 }) // Balanced resolution for speed
             .toBuffer();
 
         console.log(`[OCR] ${symbol} - Starting Fast Tesseract Pass...`);

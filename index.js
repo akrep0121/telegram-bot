@@ -162,14 +162,24 @@ async function mainLoop() {
 
                 const data = stockData[stock];
 
-                // --- 1. SURGE PROTECTION (Baseline Poisoning Prevention) ---
+                // --- 1. SURGE PROTECTION & ADAPTIVE BASELINE ---
                 // If the new reading is massively higher than our established daily average,
-                // it's likely an OCR error that escaped the scraper's hard limit. 
-                // We refuse to update 'prevLot' or 'dailyAvg' with this "poisoned" data.
-                if (data.dailyAvg > 0 && currentLot > data.dailyAvg * 2) {
-                    console.log(`[LOGIC] ${stock} - REJECTED surge anomaly. New: ${currentLot} vs Avg: ${data.dailyAvg}. Baseline preserved.`);
-                    // Skip updating history with this glitch
-                    continue;
+                // it's usually an OCR error (e.g. extra digit). 
+                // BUT: If the bot started with a WRONG (lower) baseline, we must allow it to calibrate upwards.
+                if (data.dailyAvg > 0 && currentLot > data.dailyAvg * 1.5) {
+                    data.surgeCount = (data.surgeCount || 0) + 1;
+
+                    if (data.surgeCount >= 3) {
+                        console.log(`[LOGIC] ${stock} - Constant High Readings detected. Correcting baseline UPWARDS.`);
+                        data.dailyAvg = currentLot; // Trust the new high value
+                        data.samples = [currentLot]; // Start fresh
+                        data.surgeCount = 0;
+                    } else {
+                        console.log(`[LOGIC] ${stock} - REJECTED pulse surge (${data.surgeCount}/3). New: ${fmt(currentLot)} vs Avg: ${fmt(data.dailyAvg)}.`);
+                        continue;
+                    }
+                } else {
+                    data.surgeCount = 0; // Reset counter for normal readings
                 }
 
                 // DAILY RESET LOGIC
@@ -179,10 +189,11 @@ async function mainLoop() {
                     data.samples = [];
                     data.dailyAvg = 0;
                     data.prevLot = 0;
+                    data.surgeCount = 0;
                 }
 
-                // AVERAGE CALCULATION (First 10 samples)
-                if (data.samples.length < 10) {
+                // AVERAGE CALCULATION (First 15 samples for stability)
+                if (data.samples.length < 15) {
                     data.samples.push(currentLot);
                     const sum = data.samples.reduce((a, b) => a + b, 0);
                     data.dailyAvg = Math.floor(sum / data.samples.length);
