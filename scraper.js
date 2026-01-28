@@ -9,21 +9,25 @@ async function extractLotFromImage(imageBuffer, symbol) {
         const w = metadata.width;
         const h = metadata.height;
 
-        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.1 Safe Mode) ---
-        // Wider ROI (72% width) to ensure leading digits are never clipped.
-        // Resizing EARLY (before threshold) preserves smoother numeric shapes.
+        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.2 Zırhlı Mod) ---
+        // Padding + Wider ROI + Dilation to ensure leading digits are robust.
         const processedBuffer = await sharp(imageBuffer)
             .extract({
                 left: 0,
                 top: 0,
-                width: Math.floor(w * 0.72), // Increased from 60% for safety
+                width: Math.floor(w * 0.72),
                 height: Math.floor(h * 0.35)
             })
-            .resize({ width: 2200 }) // Upscale early for character fidelity
-            .modulate({ brightness: 1.1, contrast: 1.8 }) // Crisp contrast
+            .extend({ // Margin safety for Tesseract
+                top: 10, bottom: 10, left: 20, right: 20,
+                background: { r: 255, g: 255, b: 255, alpha: 1 }
+            })
+            .resize({ width: 2200 })
+            .modulate({ brightness: 1.1, contrast: 1.9 }) // Ultra-contrast
             .extractChannel('green')
-            .threshold(175) // Slightly lower to keep thin strokes
+            .threshold(170) // Keep more "meat" on digits
             .negate()
+            .median(2) // Subtle Bolding/Dilation
             .toBuffer();
 
         console.log(`[OCR] ${symbol} - Starting Fast Tesseract Pass...`);
