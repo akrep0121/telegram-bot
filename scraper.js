@@ -3,7 +3,7 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Turbo ROI Precision Mode (V5.1)...`);
+        console.log(`[OCR] ${symbol} - Turbo ROI Zırhlı Mod (V5.2)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
         const w = metadata.width;
@@ -27,7 +27,7 @@ async function extractLotFromImage(imageBuffer, symbol) {
             .extractChannel('green')
             .threshold(170) // Keep more "meat" on digits
             .negate()
-            .median(2) // Subtle Bolding/Dilation
+            .median(3) // Subtle Bolding/Dilation (must be ODD number)
             .toBuffer();
 
         console.log(`[OCR] ${symbol} - Starting Fast Tesseract Pass...`);
