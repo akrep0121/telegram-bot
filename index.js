@@ -199,7 +199,22 @@ async function mainLoop() {
                     data.dailyAvg = Math.floor(sum / data.samples.length);
                 }
 
-                // --- 2. ALERT LOGIC (Multi-Level Verification) ---
+                // --- 2. DIGIT TRUNCATION DETECTION (Anti-False-Alarm) ---
+                // If reading drops 80%+ AND looks like a truncated version, reject it
+                if (data.prevLot > 0 && currentLot < data.prevLot * 0.2) {
+                    const prevStr = String(data.prevLot);
+                    const currStr = String(currentLot);
+                    // Check if current looks like prev with first digit(s) cut off
+                    // e.g., 42568370 → 4256837 or 2568370
+                    const isTruncation = prevStr.substring(1).startsWith(currStr.substring(0, 4)) ||
+                        prevStr.substring(2).startsWith(currStr.substring(0, 4));
+                    if (isTruncation) {
+                        console.log(`[OCR-GUARD] Basamak kesme hatası tespit edildi! ${fmt(data.prevLot)} → ${fmt(currentLot)} (Reddedildi)`);
+                        currentLot = data.prevLot; // Keep previous valid reading
+                    }
+                }
+
+                // --- 3. ALERT LOGIC (Multi-Level Verification) ---
                 let isAlert = false;
                 let baseline = 0;
                 let reason = "";
