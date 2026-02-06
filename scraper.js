@@ -3,20 +3,20 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Precision Mode (V5.4)...`);
+        console.log(`[OCR] ${symbol} - Full Capture Mode (V5.5)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
         const w = metadata.width;
         const h = metadata.height;
 
-        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.4 Precision Mode) ---
-        // Optimized for character accuracy: wider ROI, higher res, lower threshold
+        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.5 Full Capture) ---
+        // Full height to capture total row at bottom for validation
         const processedBuffer = await sharp(imageBuffer)
             .extract({
                 left: 0,
                 top: 0,
-                width: Math.floor(w * 0.75), // Wider ROI (was 0.72)
-                height: Math.floor(h * 0.38)  // Taller ROI (was 0.35)
+                width: Math.floor(w * 0.55), // Narrower width (only Bids side)
+                height: Math.floor(h * 0.95)  // Full height to capture total row
             })
             .extend({ // Extra padding on left for first digit safety
                 top: 15, bottom: 15, left: 30, right: 20,
