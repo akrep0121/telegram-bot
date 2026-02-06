@@ -3,40 +3,74 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Full Capture Mode (V5.5)...`);
+        console.log(`[OCR] ${symbol} - Dual ROI Mode (V5.6)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
         const w = metadata.width;
         const h = metadata.height;
 
-        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.5 Full Capture) ---
-        // Full height to capture total row at bottom for validation
-        const processedBuffer = await sharp(imageBuffer)
+        // --- DUAL ROI STRATEGY (V5.6) ---
+        // ROI 1: Main Table (top 40%) - for reading first rows
+        const mainROI = await sharp(imageBuffer)
             .extract({
                 left: 0,
                 top: 0,
-                width: Math.floor(w * 0.55), // Narrower width (only Bids side)
-                height: Math.floor(h * 0.95)  // Full height to capture total row
+                width: Math.floor(w * 0.55),
+                height: Math.floor(h * 0.40)
             })
-            .extend({ // Extra padding on left for first digit safety
-                top: 15, bottom: 15, left: 30, right: 20,
-                background: { r: 255, g: 255, b: 255, alpha: 1 }
-            })
-            .resize({ width: 2500 }) // Higher resolution (was 2200)
-            .modulate({ brightness: 1.05, contrast: 2.0 }) // Higher contrast
+            .extend({ top: 15, bottom: 15, left: 30, right: 20, background: { r: 255, g: 255, b: 255, alpha: 1 } })
+            .resize({ width: 2000 })
+            .modulate({ brightness: 1.05, contrast: 2.0 })
             .extractChannel('green')
-            .threshold(160) // Lower threshold = more character detail (was 170)
+            .threshold(160)
             .negate()
             .median(3)
             .toBuffer();
 
-        console.log(`[OCR] ${symbol} - Starting Fast Tesseract Pass...`);
-        const result = await Tesseract.recognize(processedBuffer, 'tur+eng', {
-            tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlışUCAYM ', // Added symbol bias
-            tessedit_pageseg_mode: '6' // Sparse table mode
+        // ROI 2: Total Row (bottom 12%) - for validation ONLY
+        const totalROI = await sharp(imageBuffer)
+            .extract({
+                left: 0,
+                top: Math.floor(h * 0.88),
+                width: Math.floor(w * 0.55),
+                height: Math.floor(h * 0.12)
+            })
+            .extend({ top: 10, bottom: 10, left: 30, right: 20, background: { r: 255, g: 255, b: 255, alpha: 1 } })
+            .resize({ width: 1500 })
+            .modulate({ brightness: 1.05, contrast: 2.0 })
+            .extractChannel('green')
+            .threshold(160)
+            .negate()
+            .median(3)
+            .toBuffer();
+
+        // --- OCR PASS 1: Main Table ---
+        console.log(`[OCR] ${symbol} - Scanning Main Table...`);
+        const mainResult = await Tesseract.recognize(mainROI, 'tur+eng', {
+            tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlış ',
+            tessedit_pageseg_mode: '6'
         });
 
-        const lines = result.data.text.split('\n');
+        // --- OCR PASS 2: Total Row (Quick) ---
+        console.log(`[OCR] ${symbol} - Scanning Total Row...`);
+        const totalResult = await Tesseract.recognize(totalROI, 'tur+eng', {
+            tessedit_char_whitelist: '0123456789., ',
+            tessedit_pageseg_mode: '7' // Single line mode
+        });
+
+        // Extract total lot from bottom row
+        let totalLot = null;
+        const totalText = totalResult.data.text.replace(/[^\d]/g, ' ').split(/\s+/);
+        for (const num of totalText) {
+            const val = parseInt(num);
+            if (val > 1000000) { // Total is usually large
+                totalLot = val;
+                console.log(`[OCR] ${symbol} - Total Row Detected: ${totalLot}`);
+                break;
+            }
+        }
+
+        const lines = mainResult.data.text.split('\n');
 
         // --- DATA ANALYSIS ---
         let targetPriceInt = null;
@@ -92,19 +126,11 @@ async function extractLotFromImage(imageBuffer, symbol) {
         }
 
         if (candidates.length === 0) {
-            console.log(`[OCR] ${symbol} - Mini-ROI failed to detect rows.`);
+            console.log(`[OCR] ${symbol} - Main ROI failed to detect rows.`);
             return null;
         }
 
-        // 3. EXTRACT TOTAL ROW (Last candidate is usually the total)
-        let totalLot = null;
-        if (candidates.length >= 2) {
-            const lastCandidate = candidates[candidates.length - 1];
-            if (lastCandidate.lot > 1000000) { // Total is usually large
-                totalLot = lastCandidate.lot;
-                console.log(`[OCR] ${symbol} - Total Row Detected: ${totalLot}`);
-            }
-        }
+        // totalLot is already extracted from dedicated Total ROI above
 
         // 4. SELECTION LOGIC WITH VALIDATION
         let bestLot = null;
