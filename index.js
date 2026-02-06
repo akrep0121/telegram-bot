@@ -162,11 +162,11 @@ async function mainLoop() {
 
                 const data = stockData[stock];
 
-                // --- 1. SURGE PROTECTION & ADAPTIVE BASELINE ---
+                // --- 1. SURGE PROTECTION (Only after baseline is established) ---
                 // If the new reading is massively higher than our established daily average,
                 // it's usually an OCR error (e.g. extra digit). 
-                // BUT: If the bot started with a WRONG (lower) baseline, we must allow it to calibrate upwards.
-                if (data.dailyAvg > 0 && currentLot > data.dailyAvg * 1.5) {
+                // ONLY ACTIVE AFTER 5+ SAMPLES - before that, accept all readings for calibration.
+                if (data.samples.length >= 5 && data.dailyAvg > 0 && currentLot > data.dailyAvg * 3) {
                     data.surgeCount = (data.surgeCount || 0) + 1;
 
                     if (data.surgeCount >= 3) {
@@ -217,22 +217,27 @@ async function mainLoop() {
                     }
                 }
 
-                // --- 3. ALERT LOGIC (Multi-Level Verification) ---
+                // --- 3. ALERT LOGIC (Only after baseline is established with 5+ samples) ---
                 let isAlert = false;
                 let baseline = 0;
                 let reason = "";
 
-                // Average Check (50%)
-                if (data.dailyAvg > 0 && currentLot < data.dailyAvg * 0.5) {
-                    isAlert = true;
-                    baseline = data.dailyAvg;
-                    reason = `Başlangıç eşiği (${fmt(baseline)}) aşıldı!`;
-                }
-                // Sudden Check (30%)
-                else if (data.prevLot > 0 && currentLot < data.prevLot * 0.7) {
-                    isAlert = true;
-                    baseline = data.prevLot;
-                    reason = `Ani çöküş! Önceki okumadan ciddi düşüş.`;
+                // ONLY CHECK ALERTS IF WE HAVE 5+ SAMPLES (stable baseline)
+                if (data.samples.length >= 5) {
+                    // Average Check (50%)
+                    if (data.dailyAvg > 0 && currentLot < data.dailyAvg * 0.5) {
+                        isAlert = true;
+                        baseline = data.dailyAvg;
+                        reason = `Başlangıç eşiği (${fmt(baseline)}) aşıldı!`;
+                    }
+                    // Sudden Check (30%)
+                    else if (data.prevLot > 0 && currentLot < data.prevLot * 0.7) {
+                        isAlert = true;
+                        baseline = data.prevLot;
+                        reason = `Ani çöküş! Önceki okumadan ciddi düşüş.`;
+                    }
+                } else {
+                    console.log(`[BASELINE] ${stock} - Waiting for stable baseline (${data.samples.length}/5 samples needed)`);
                 }
 
                 if (isAlert) {
