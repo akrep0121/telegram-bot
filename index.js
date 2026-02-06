@@ -192,11 +192,14 @@ async function mainLoop() {
                     data.surgeCount = 0;
                 }
 
-                // AVERAGE CALCULATION (First 15 samples for stability)
+                // MEDIAN CALCULATION (First 15 samples - auto-rejects outliers)
                 if (data.samples.length < 15) {
                     data.samples.push(currentLot);
-                    const sum = data.samples.reduce((a, b) => a + b, 0);
-                    data.dailyAvg = Math.floor(sum / data.samples.length);
+                    // Sort and take middle value (Median)
+                    const sorted = [...data.samples].sort((a, b) => a - b);
+                    const mid = Math.floor(sorted.length / 2);
+                    data.dailyAvg = sorted.length % 2 ? sorted[mid] : Math.floor((sorted[mid - 1] + sorted[mid]) / 2);
+                    console.log(`[BASELINE] ${stock} - Median: ${fmt(data.dailyAvg)} (${data.samples.length}/15 samples)`);
                 }
 
                 // --- 2. DIGIT TRUNCATION DETECTION (Anti-False-Alarm) ---
@@ -233,37 +236,50 @@ async function mainLoop() {
                 }
 
                 if (isAlert) {
-                    console.log(`[ALERT] Potential drop for ${stock} (${fmt(currentLot)}). Fast-verifying...`);
+                    console.log(`[ALERT] Potential drop for ${stock} (${fmt(currentLot)}). Triple-verifying...`);
 
-                    // HIGH-SPEED VERIFICATION: Just one more rapid check
+                    // TRIPLE VERIFICATION: 3 consecutive checks for extreme drops
                     const v1 = await performStockCheck(stock);
+                    await delay(2000);
+                    const v2 = await performStockCheck(stock);
+                    await delay(2000);
+                    const v3 = await performStockCheck(stock);
 
+                    // All 3 must confirm the drop
                     let confirmed = false;
-                    if (v1 !== null) {
-                        if (baseline === data.dailyAvg && v1 < baseline * 0.5) confirmed = true;
-                        else if (baseline === data.prevLot && v1 < baseline * 0.7) confirmed = true;
+                    if (v1 !== null && v2 !== null && v3 !== null) {
+                        const allLow = [v1, v2, v3].every(v => v < baseline * 0.5);
+                        // Also check they are consistent with each other (within 20%)
+                        const max = Math.max(v1, v2, v3);
+                        const min = Math.min(v1, v2, v3);
+                        const isConsistent = min > max * 0.8;
+
+                        if (allLow && isConsistent) {
+                            confirmed = true;
+                            console.log(`[ALERT] Triple-check PASSED: ${fmt(v1)}, ${fmt(v2)}, ${fmt(v3)}`);
+                        } else {
+                            console.log(`[ALERT] Triple-check FAILED (inconsistent): ${fmt(v1)}, ${fmt(v2)}, ${fmt(v3)}`);
+                        }
                     }
 
-                    if (confirmed && v1 !== null) {
-                        const finalRatio = ((baseline - v1) / baseline) * 100;
+                    if (confirmed) {
+                        const finalValue = Math.floor((v1 + v2 + v3) / 3);
+                        const finalRatio = ((baseline - finalValue) / baseline) * 100;
                         const alertMsg = `🚨🚨🚨 TAVAN BOZABİLİR ALARMI 🚨🚨🚨\n\n` +
                             `📈 Hisse: ${stock}\n` +
-                            `🔴 Mevcut Lot: ${fmt(v1)}\n` +
+                            `🔴 Mevcut Lot: ${fmt(finalValue)}\n` +
                             `📊 Başlangıç Eşiği: ${fmt(baseline)}\n` +
                             `📉 Düşüş Oranı: %${finalRatio.toFixed(1)}\n` +
                             `🔍 Sebep: ${reason}\n` +
-                            `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(v1)}\n\n` +
+                            `🔄 Önceki: ${fmt(data.prevLot)} → Şimdiki: ${fmt(finalValue)}\n\n` +
                             `Risk sevmeyenler için vedalaşma vaktidir. YTD`;
 
                         await broadcast(alertMsg);
-                        console.log(`[ALERT] High-Speed Confirmed for ${stock}. New Baseline candidate: ${fmt(v1)}`);
-                        currentLot = v1;
-                    } else if (v1 !== null) {
-                        console.log(`[ALERT] False alarm rejected for ${stock}. Capturing valid reading: ${fmt(v1)}`);
-                        currentLot = v1; // Set to the high reading to allow baseline calibration
+                        console.log(`[ALERT] Triple-Confirmed for ${stock}. Alarm sent.`);
+                        currentLot = finalValue;
                     } else {
-                        console.log(`[ALERT] Verification failed (null). Keeping previous state.`);
-                        currentLot = data.prevLot;
+                        console.log(`[ALERT] False alarm REJECTED for ${stock}. Keeping baseline.`);
+                        currentLot = data.prevLot; // Keep previous valid reading
                     }
                 }
 

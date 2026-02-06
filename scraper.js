@@ -104,8 +104,7 @@ async function extractLotFromImage(imageBuffer, symbol) {
             const c = candidates[i];
 
             // Priority 1: Large top row
-            // SAFETY CAP: Ignore > 100M (Ghost Digit Error Protection)
-            if (i === 0 && c.lot > 100000 && c.lot < 100000000) {
+            if (i === 0 && c.lot > 100000) {
                 console.log(`[OCR] ${symbol} - Turbo Match (Row 1): Lot=${c.lot}`);
                 return { symbol, topBidLot: c.lot };
             }
