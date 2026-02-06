@@ -3,31 +3,31 @@ const sharp = require('sharp');
 
 async function extractLotFromImage(imageBuffer, symbol) {
     try {
-        console.log(`[OCR] ${symbol} - Turbo ROI Zırhlı Mod (V5.2)...`);
+        console.log(`[OCR] ${symbol} - Precision Mode (V5.4)...`);
 
         const metadata = await sharp(imageBuffer).metadata();
         const w = metadata.width;
         const h = metadata.height;
 
-        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.2 Zırhlı Mod) ---
-        // Padding + Wider ROI + Dilation to ensure leading digits are robust.
+        // --- STAGE 1: TURBO ROI PRE-PROCESSING (V5.4 Precision Mode) ---
+        // Optimized for character accuracy: wider ROI, higher res, lower threshold
         const processedBuffer = await sharp(imageBuffer)
             .extract({
                 left: 0,
                 top: 0,
-                width: Math.floor(w * 0.72),
-                height: Math.floor(h * 0.35)
+                width: Math.floor(w * 0.75), // Wider ROI (was 0.72)
+                height: Math.floor(h * 0.38)  // Taller ROI (was 0.35)
             })
-            .extend({ // Margin safety for Tesseract
-                top: 10, bottom: 10, left: 20, right: 20,
+            .extend({ // Extra padding on left for first digit safety
+                top: 15, bottom: 15, left: 30, right: 20,
                 background: { r: 255, g: 255, b: 255, alpha: 1 }
             })
-            .resize({ width: 2200 })
-            .modulate({ brightness: 1.1, contrast: 1.9 }) // Ultra-contrast
+            .resize({ width: 2500 }) // Higher resolution (was 2200)
+            .modulate({ brightness: 1.05, contrast: 2.0 }) // Higher contrast
             .extractChannel('green')
-            .threshold(170) // Keep more "meat" on digits
+            .threshold(160) // Lower threshold = more character detail (was 170)
             .negate()
-            .median(3) // Subtle Bolding/Dilation (must be ODD number)
+            .median(3)
             .toBuffer();
 
         console.log(`[OCR] ${symbol} - Starting Fast Tesseract Pass...`);
