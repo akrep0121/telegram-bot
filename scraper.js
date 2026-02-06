@@ -96,12 +96,28 @@ async function extractLotFromImage(imageBuffer, symbol) {
             return null;
         }
 
-        // 3. SELECTION LOGIC
+        // 3. EXTRACT TOTAL ROW (Last candidate is usually the total)
+        let totalLot = null;
+        if (candidates.length >= 2) {
+            const lastCandidate = candidates[candidates.length - 1];
+            if (lastCandidate.lot > 1000000) { // Total is usually large
+                totalLot = lastCandidate.lot;
+                console.log(`[OCR] ${symbol} - Total Row Detected: ${totalLot}`);
+            }
+        }
+
+        // 4. SELECTION LOGIC WITH VALIDATION
         let bestLot = null;
         let minDiff = 888888;
 
-        for (let i = 0; i < candidates.length; i++) {
+        for (let i = 0; i < candidates.length - 1; i++) { // Exclude last (total) row
             const c = candidates[i];
+
+            // VALIDATION: Row lot cannot exceed total lot
+            if (totalLot && c.lot > totalLot) {
+                console.log(`[OCR] ${symbol} - REJECTED Ghost Reading: ${c.lot} > Total (${totalLot})`);
+                continue;
+            }
 
             // Priority 1: Large top row
             if (i === 0 && c.lot > 100000) {
