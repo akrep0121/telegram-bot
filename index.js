@@ -139,9 +139,9 @@ async function mainLoop() {
     isCheckRunning = true;
 
     try {
-        // 3. Reporting Schedule (10, 12, 14, 16, 18)
+        // 3. Reporting Schedule (10, 12, 14, 16, 18) - 3 min window for safety
         const reportHours = [10, 12, 14, 16, 18];
-        if (minute === 0 && reportHours.includes(hour) && lastReportHour !== hour) {
+        if (minute <= 2 && reportHours.includes(hour) && lastReportHour !== hour) {
             await sendGeneralReport(hour);
             lastReportHour = hour;
         }
