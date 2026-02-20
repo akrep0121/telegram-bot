@@ -102,7 +102,13 @@ async function downloadBotPhoto(message) {
     if (!client.connected) await startUserbot();
     try {
         console.log("[USERBOT] Downloading photo...");
-        const buffer = await client.downloadMedia(message, {});
+        // Add a 30s timeout to download to prevent infinite hang
+        const downloadPromise = client.downloadMedia(message, {});
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Download Timeout")), 30000)
+        );
+
+        const buffer = await Promise.race([downloadPromise, timeoutPromise]);
         return buffer;
     } catch (e) {
         console.error("[USERBOT] Download failed:", e.message);

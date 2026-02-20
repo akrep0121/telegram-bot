@@ -31,6 +31,7 @@ let watchedStocks = [];
 let stockData = {}; // { 'SASA': { day: 20, samples: [], dailyAvg: 0, prevLot: 0 } }
 let isBotActive = true;
 let isCheckRunning = false;
+let lastCheckStartTime = 0; // For hang detection
 let lastReportHour = -1;
 
 // --- COMMANDS ---
@@ -110,38 +111,37 @@ bot.command("test", async (ctx) => {
 async function mainLoop() {
     // 1. Activity Gate
     if (!isBotActive) return;
+    // 3. Hang Protection: If a check is running for more than 10 minutes, something is wrong.
+    const loopAge = Date.now() - lastCheckStartTime;
+    if (isCheckRunning && loopAge > 10 * 60 * 1000) {
+        console.warn(`[WATCHDOG] Loop HANG detected (${Math.round(loopAge / 1000)}s). Forcing reset.`);
+        isCheckRunning = false;
+    }
+
     if (isCheckRunning) return;
 
-    const now = new Date();
-    // Adjust to Turkey Time (UTC+3)
-    const trTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
-
     // Time Components
+    const now = new Date();
+    const trTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
     const hour = trTime.getUTCHours();
     const minute = trTime.getUTCMinutes();
     const dayOfWeek = trTime.getUTCDay(); // 0=Sun, 6=Sat
     const dayOfMonth = trTime.getUTCDate();
-    const month = trTime.getUTCMonth() + 1; // 1-12
+    const month = trTime.getUTCMonth() + 1;
 
-    // 2. Schedule Logic (09:56 - 18:00)
-
-    // Weekend Check
+    // Schedule Logic (09:56 - 18:05)
     if (dayOfWeek === 0 || dayOfWeek === 6) return;
-
-    // Time Interval Check
-    const currentTimeVal = hour * 100 + minute; // e.g. 956 for 09:56
-    if (currentTimeVal < 956 || currentTimeVal > 1800) return;
-
-    // Holiday Check
+    const currentTimeVal = hour * 100 + minute;
+    if (currentTimeVal < 956 || currentTimeVal > 1805) return;
     if (isHoliday(dayOfMonth, month)) return;
 
-
     isCheckRunning = true;
+    lastCheckStartTime = Date.now();
 
     try {
-        // 3. Reporting Schedule (10, 12, 14, 16, 18) - 3 min window for safety
+        // 4. Reporting Schedule (10, 12, 14, 16, 18) - 6 min window for safety
         const reportHours = [10, 12, 14, 16, 18];
-        if (minute <= 2 && reportHours.includes(hour) && lastReportHour !== hour) {
+        if (minute <= 5 && reportHours.includes(hour) && lastReportHour !== hour) {
             await sendGeneralReport(hour);
             lastReportHour = hour;
         }

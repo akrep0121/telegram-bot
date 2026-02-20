@@ -44,19 +44,35 @@ async function extractLotFromImage(imageBuffer, symbol) {
             .median(3)
             .toBuffer();
 
+        // Helper to wrap promise with timeout
+        const withTimeout = (promise, ms, name) => {
+            return Promise.race([
+                promise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} Timeout after ${ms}ms`)), ms))
+            ]);
+        };
+
         // --- OCR PASS 1: Main Table ---
         console.log(`[OCR] ${symbol} - Scanning Main Table...`);
-        const mainResult = await Tesseract.recognize(mainROI, 'tur+eng', {
-            tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlış ',
-            tessedit_pageseg_mode: '6'
-        });
+        const mainResult = await withTimeout(
+            Tesseract.recognize(mainROI, 'tur+eng', {
+                tessedit_char_whitelist: '0123456789.,:|-EmirAdetAlış ',
+                tessedit_pageseg_mode: '6'
+            }),
+            60000,
+            "Main OCR"
+        );
 
         // --- OCR PASS 2: Total Row (Quick) ---
         console.log(`[OCR] ${symbol} - Scanning Total Row...`);
-        const totalResult = await Tesseract.recognize(totalROI, 'tur+eng', {
-            tessedit_char_whitelist: '0123456789., ',
-            tessedit_pageseg_mode: '7' // Single line mode
-        });
+        const totalResult = await withTimeout(
+            Tesseract.recognize(totalROI, 'tur+eng', {
+                tessedit_char_whitelist: '0123456789., ',
+                tessedit_pageseg_mode: '7' // Single line mode
+            }),
+            45000,
+            "Total OCR"
+        );
 
         // Extract total lot from bottom row
         let totalLot = null;
